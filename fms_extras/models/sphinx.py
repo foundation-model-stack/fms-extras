@@ -23,6 +23,7 @@ from fms.modules.positions import RotaryEmbedding
 from fms.utils import serialization
 from fms.utils.activation import str_to_activation
 from fms.utils.config import ModelConfig
+from fms.utils.serialization import FusableWeightsMissingError
 from fms.utils.tokenizers import _has_hf, get_tokenizer
 
 
@@ -372,7 +373,7 @@ models.register_model(_architecture_name, "8b", _sphinx_factory_factory(_8b_conf
 models.register_model(_architecture_name, "13b", _sphinx_factory_factory(_13b_config), _13b_config)
 
 
-def _megatron_sd_to_fms_sd(hf_sd: Mapping[Any, Any], config: SphinxConfig) -> Mapping[Any, Any]:
+def _megatron_sd_to_fms_sd(hf_sd: Mapping[Any, Any]) -> Mapping[Any, Any]:
     replacements = [
         # embedding
         (r"^transformer\.wte\.weight", "shared.emb.weight"),
@@ -391,34 +392,6 @@ def _megatron_sd_to_fms_sd(hf_sd: Mapping[Any, Any], config: SphinxConfig) -> Ma
         (r"^lm_head\.weight", "shared.head.weight"),
     ]
 
-    is_1b = config.emb_dim == 2048
-    is_8b = config.emb_dim == 4608
-    is_13b = config.emb_dim == 5120
-    if is_1b:
-        num_heads = 16
-        num_key_value_heads = 4
-        emb_dim = 2048
-        n_inner = int(emb_dim * (5464 / 2048))
-    elif is_8b:
-        num_heads = 36
-        num_key_value_heads = 4
-        emb_dim = 4608
-        n_inner = int(emb_dim * (12288 / 4608))
-    elif is_13b:
-        num_heads = 40
-        num_key_value_heads = 4
-        emb_dim = 5120
-        n_inner = int(emb_dim * (13696 / 5120))
-    else:
-        raise ValueError("the state dict given is not one of Sphinx 1b, 8b, 13b")
-
-    mlp_splits = [n_inner, n_inner]
-    attn_splits = [
-        (num_heads * (emb_dim // num_heads)) // num_key_value_heads,
-        (num_key_value_heads * (emb_dim // num_heads)) // num_key_value_heads,
-        (num_key_value_heads * (emb_dim // num_heads)) // num_key_value_heads,
-    ]
-
     qkv_weight_pattern = re.compile("transformer.h.[0-9]+.attn.c_attn.weight")
     qkv_bias_pattern = re.compile("transformer.h.[0-9]+.attn.c_attn.bias")
     mlp_weight_pattern = re.compile("transformer.h.[0-9]+.mlp.c_fc.weight")
@@ -432,7 +405,20 @@ def _megatron_sd_to_fms_sd(hf_sd: Mapping[Any, Any], config: SphinxConfig) -> Ma
 
         # qkv fused
         if bool(qkv_weight_pattern.match(name)):
+            bias_name = name.replace("weight", "bias")
+            if bias_name not in hf_sd:
+                raise FusableWeightsMissingError([bias_name])
             new_sd.pop(new_name)
+
+            emb_dim = param.size(1)
+            num_heads = emb_dim // 128
+            num_key_value_heads = (param.size(0) // 128 - num_heads) / 2
+            attn_splits = [
+                (num_heads * 128) // num_key_value_heads,
+                (num_key_value_heads * 128) // num_key_value_heads,
+                (num_key_value_heads * 128) // num_key_value_heads,
+            ]
+
             prefix = new_name.replace("c_attn.weight", "")
             q, k, v = param.view(num_key_value_heads, -1, emb_dim).split(attn_splits, dim=1)
             q = q.reshape(-1, q.size(2))
@@ -445,7 +431,20 @@ def _megatron_sd_to_fms_sd(hf_sd: Mapping[Any, Any], config: SphinxConfig) -> Ma
             new_sd[f"{prefix}key.weight"] = k
             new_sd[f"{prefix}value.weight"] = v
         elif bool(qkv_bias_pattern.match(name)):
+            weight_name = name.replace("bias", "weight")
+            if weight_name not in hf_sd:
+                raise FusableWeightsMissingError([weight_name])
             new_sd.pop(new_name)
+
+            emb_dim = hf_sd[weight_name].size(1)
+            num_heads = emb_dim // 128
+            num_key_value_heads = (param.size(0) // 128 - num_heads) / 2
+            attn_splits = [
+                (num_heads * 128) // num_key_value_heads,
+                (num_key_value_heads * 128) // num_key_value_heads,
+                (num_key_value_heads * 128) // num_key_value_heads,
+            ]
+
             prefix = new_name.replace("c_attn.bias", "")
             q, k, v = param.view(num_key_value_heads, -1).split(attn_splits, dim=1)
             q = q.reshape(-1)
@@ -460,13 +459,13 @@ def _megatron_sd_to_fms_sd(hf_sd: Mapping[Any, Any], config: SphinxConfig) -> Ma
         elif bool(mlp_weight_pattern.match(name)):
             new_sd.pop(new_name)
             prefix = new_name.replace("mlp.c_fc.weight", "")
-            w1, wg = param.split(mlp_splits, dim=0)
+            w1, wg = param.chunk(2)
             new_sd[f"{prefix}ff_sub_layer.w1.weight"] = w1
             new_sd[f"{prefix}ff_sub_layer.wg.weight"] = wg
         elif bool(mlp_bias_pattern.match(name)):
             new_sd.pop(new_name)
             prefix = new_name.replace("mlp.c_fc.bias", "")
-            w1, wg = param.split(mlp_splits, dim=0)
+            w1, wg = param.chunk(2)
             new_sd[f"{prefix}ff_sub_layer.w1.bias"] = w1
             new_sd[f"{prefix}ff_sub_layer.wg.bias"] = wg
 
