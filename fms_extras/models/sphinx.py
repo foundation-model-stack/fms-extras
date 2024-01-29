@@ -160,6 +160,12 @@ class SphinxBlock(nn.Module):
 
 
 class Sphinx(nn.Module):
+    """
+    This is an IBM model similar to LLaMA with a few key differences:
+
+    - tie heads is set to True
+    - adding use_bias to attn and mlp
+    """
     def __init__(
         self,
         config: Optional[SphinxConfig] = None,
@@ -366,11 +372,11 @@ def _sphinx_factory_factory(config):
     return factory
 
 
-models.register_model(_architecture_name, "1b", _sphinx_factory_factory(_1b_config), _1b_config)
+models.register_model(_architecture_name, "1b", _sphinx_factory_factory(_1b_config))
 
-models.register_model(_architecture_name, "8b", _sphinx_factory_factory(_8b_config), _8b_config)
+models.register_model(_architecture_name, "8b", _sphinx_factory_factory(_8b_config))
 
-models.register_model(_architecture_name, "13b", _sphinx_factory_factory(_13b_config), _13b_config)
+models.register_model(_architecture_name, "13b", _sphinx_factory_factory(_13b_config))
 
 
 def _megatron_sd_to_fms_sd(hf_sd: Mapping[Any, Any]) -> Mapping[Any, Any]:
@@ -412,7 +418,7 @@ def _megatron_sd_to_fms_sd(hf_sd: Mapping[Any, Any]) -> Mapping[Any, Any]:
 
             emb_dim = param.size(1)
             num_heads = emb_dim // 128
-            num_key_value_heads = (param.size(0) // 128 - num_heads) / 2
+            num_key_value_heads = (param.size(0) // 128 - num_heads) // 2
             attn_splits = [
                 (num_heads * 128) // num_key_value_heads,
                 (num_key_value_heads * 128) // num_key_value_heads,
@@ -438,7 +444,7 @@ def _megatron_sd_to_fms_sd(hf_sd: Mapping[Any, Any]) -> Mapping[Any, Any]:
 
             emb_dim = hf_sd[weight_name].size(1)
             num_heads = emb_dim // 128
-            num_key_value_heads = (param.size(0) // 128 - num_heads) / 2
+            num_key_value_heads = (param.size(0) // 128 - num_heads) // 2
             attn_splits = [
                 (num_heads * 128) // num_key_value_heads,
                 (num_key_value_heads * 128) // num_key_value_heads,
