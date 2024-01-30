@@ -166,6 +166,7 @@ class Sphinx(nn.Module):
     - Sphinx ties the weights of the input/output embeddings
     - Sphinx adds a bias to attention and mlp
     """
+
     def __init__(
         self,
         config: Optional[SphinxConfig] = None,
@@ -202,9 +203,13 @@ class Sphinx(nn.Module):
         )
         if isinstance(self.distributed_strategy, UniformModelParallelStrategy):
             for dev_idx in set(self.distributed_strategy.layer_to_device.values()):
-                self.rot_emb.compute_freqs_cis(torch.device("cuda", dev_idx), self.config.max_expected_seq_len)
+                self.rot_emb.compute_freqs_cis(
+                    torch.device("cuda", dev_idx), self.config.max_expected_seq_len
+                )
         else:
-            self.rot_emb.compute_freqs_cis(self.shared.emb.weight.device, self.config.max_expected_seq_len)
+            self.rot_emb.compute_freqs_cis(
+                self.shared.emb.weight.device, self.config.max_expected_seq_len
+            )
 
         self.layers = []
         for i in range(self.config.nlayers):
@@ -221,7 +226,9 @@ class Sphinx(nn.Module):
             eps=self.config.norm_eps,
             use_high_precision_pow=True,
         )
-        self.dec_norm = self.distributed_strategy.distribute_module(dec_norm, final_layers=True)
+        self.dec_norm = self.distributed_strategy.distribute_module(
+            dec_norm, final_layers=True
+        )
 
         if self.config.p_dropout:
             self.dropout = nn.Dropout(self.config.p_dropout)
@@ -238,7 +245,9 @@ class Sphinx(nn.Module):
     def reset_params(self):
         # Modules are self-initializing, we're just going to down-scale the final prediction head to be
         # mixed-fan (inputs and gradients scale to the same inverse factors) if it isn't tied
-        self.shared.head.weight.data.normal_(0, 1 / math.sqrt(math.sqrt(self.width * self.shared.vocab_size)))
+        self.shared.head.weight.data.normal_(
+            0, 1 / math.sqrt(math.sqrt(self.width * self.shared.vocab_size))
+        )
 
     def _helper(
         self,
@@ -314,7 +323,9 @@ class Sphinx(nn.Module):
         only_last_token=False,
         attn_algorithm=None,
     ):
-        output, cache = self._helper(x, mask, position_ids, past_key_value_states, use_cache, attn_algorithm)
+        output, cache = self._helper(
+            x, mask, position_ids, past_key_value_states, use_cache, attn_algorithm
+        )
 
         if only_last_token:
             output = output[:, -1, :]
@@ -426,12 +437,18 @@ def _megatron_sd_to_fms_sd(hf_sd: Mapping[Any, Any]) -> Mapping[Any, Any]:
             ]
 
             prefix = new_name.replace("c_attn.weight", "")
-            q, k, v = param.view(num_key_value_heads, -1, emb_dim).split(attn_splits, dim=1)
+            q, k, v = param.view(num_key_value_heads, -1, emb_dim).split(
+                attn_splits, dim=1
+            )
             q = q.reshape(-1, q.size(2))
             k = k.reshape(-1, k.size(2))
             v = v.reshape(-1, v.size(2))
             q = q.view(num_heads, 2, -1, q.size(1)).transpose(1, 2).reshape(*q.size())
-            k = k.view(num_key_value_heads, 2, -1, k.size(1)).transpose(1, 2).reshape(*k.size())
+            k = (
+                k.view(num_key_value_heads, 2, -1, k.size(1))
+                .transpose(1, 2)
+                .reshape(*k.size())
+            )
 
             new_sd[f"{prefix}query.weight"] = q
             new_sd[f"{prefix}key.weight"] = k

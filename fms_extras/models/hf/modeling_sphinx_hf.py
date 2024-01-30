@@ -2,11 +2,12 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
-from fms_extras.models.sphinx import Sphinx, SphinxConfig
 from fms.models.hf.lm_head_mixins import LMHeadModelLMHeadMixin
 from fms.models.hf.modeling_hf_adapter import HFDecoder, HFDecoderModelArchitecture
 from transformers import PretrainedConfig
 from transformers.modeling_outputs import BaseModelOutputWithPastAndCrossAttentions
+
+from fms_extras.models.sphinx import Sphinx, SphinxConfig
 
 
 class HFAdaptedSphinxConfig(PretrainedConfig):
@@ -63,8 +64,12 @@ class HFAdaptedSphinxConfig(PretrainedConfig):
         )
 
     @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path, **kwargs) -> "PretrainedConfig":
-        config_dict, kwargs = cls.get_config_dict(pretrained_model_name_or_path, **kwargs)
+    def from_pretrained(
+        cls, pretrained_model_name_or_path, **kwargs
+    ) -> "PretrainedConfig":
+        config_dict, kwargs = cls.get_config_dict(
+            pretrained_model_name_or_path, **kwargs
+        )
 
         return cls.from_dict(config_dict, **kwargs)
 
@@ -88,7 +93,9 @@ class HFAdaptedSphinxDecoder(HFDecoder):
         position_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[Tuple[torch.Tensor]] = None,
         use_cache: Optional[bool] = None,
-        attn_algorithm: Optional[str] = None,  # this can be passed in from top most forward
+        attn_algorithm: Optional[
+            str
+        ] = None,  # this can be passed in from top most forward
         *args,
         **kwargs,
     ) -> BaseModelOutputWithPastAndCrossAttentions:
@@ -104,7 +111,9 @@ class HFAdaptedSphinxDecoder(HFDecoder):
         present_key_values = None
         if isinstance(output, tuple):
             output, present_key_values = output
-        return BaseModelOutputWithPastAndCrossAttentions(last_hidden_state=output, past_key_values=present_key_values)
+        return BaseModelOutputWithPastAndCrossAttentions(
+            last_hidden_state=output, past_key_values=present_key_values
+        )
 
 
 class HFAdaptedSphinxHeadless(HFDecoderModelArchitecture):
@@ -122,7 +131,6 @@ class HFAdaptedSphinxHeadless(HFDecoderModelArchitecture):
         *args,
         **kwargs,
     ):
-
         # in the case we have not yet received the encoder/decoder/embedding, initialize it here
         if decoder is None or embedding is None:
             params = config.to_dict()
@@ -153,7 +161,9 @@ class HFAdaptedSphinxHeadless(HFDecoderModelArchitecture):
         # Add more cached rope freqs if over cached number
         max_expected_len = input_ids.shape[1] + torch.max(position_ids)
         if max_expected_len > self.decoder.model.rot_emb.max_seq_len:
-            self.decoder.model.rot_emb.compute_freqs_cis(input_ids.device, max_expected_len)
+            self.decoder.model.rot_emb.compute_freqs_cis(
+                input_ids.device, max_expected_len
+            )
 
         return {
             "input_ids": input_ids,
@@ -173,7 +183,9 @@ class HFAdaptedSphinxForCausalLM(LMHeadModelLMHeadMixin, HFAdaptedSphinxHeadless
         super().__init__(config=config, bias=False, *args, **kwargs)
 
     @classmethod
-    def _hf_model_from_fms(cls, model: Sphinx, config: HFAdaptedSphinxConfig) -> "HFAdaptedSphinxForCausalLM":
+    def _hf_model_from_fms(
+        cls, model: Sphinx, config: HFAdaptedSphinxConfig
+    ) -> "HFAdaptedSphinxForCausalLM":
         return cls(
             config=config,
             decoder=model,

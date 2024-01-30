@@ -1,6 +1,5 @@
 import pytest
 import torch
-from fms_extras.models.sphinx import Sphinx, SphinxConfig
 from fms.testing._internal.model_test_suite import (
     ConfigFixtureMixin,
     ModelCompileTestSuite,
@@ -8,6 +7,8 @@ from fms.testing._internal.model_test_suite import (
     ModelConsistencyTestSuite,
     ModelFixtureMixin,
 )
+
+from fms_extras.models.sphinx import Sphinx, SphinxConfig
 
 
 class SphinxFixtures(ConfigFixtureMixin, ModelFixtureMixin):
