@@ -9,7 +9,12 @@ setup(
     description="IBM Foundation Model Stack Extras",
     url="https://github.com/foundation-model-stack/fms-extras",
     packages=find_packages(),
-    install_requires=["torch >= 2.1", "ibm-fms >= 0.0.3", "transformers >= 4.35.0", "accelerate >= 0.26.1"],
+    install_requires=[
+        "torch >= 2.1",
+        "ibm-fms >= 0.0.3",
+        "transformers >= 4.35.0",
+        "accelerate >= 0.26.1",
+    ],
     license="Apache License 2.0",
     classifiers=[
         "Programming Language :: Python :: 3",
