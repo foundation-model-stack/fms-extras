@@ -2,7 +2,7 @@ from setuptools import find_packages, setup
 
 
 setup(
-    name="fms-extras",
+    name="fms_extras",
     version="0.0.1",
     author="Brian Vaughan, Joshua Rosenkranz, Antoni Viros i Martin, Davis Wertheimer, Supriyo Chakraborty, Raghu Kiran Ganti",
     author_email="bvaughan@ibm.com, jmrosenk@us.ibm.com, aviros@ibm.com, Davis.Wertheimer@ibm.com, supriyo@us.ibm.com, rganti@us.ibm.com",

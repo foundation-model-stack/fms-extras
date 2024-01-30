@@ -31,5 +31,5 @@ jobs:
         
     - name: Test with pytest
       run: |
-        mypy --exclude hf --exclude testing fms-extras
+        mypy --exclude hf --exclude testing fms_extras
 

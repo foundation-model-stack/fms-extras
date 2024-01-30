@@ -14,5 +14,5 @@ jobs:
           version: "~= 23.3.0"
       - uses: isort/isort-action@master
         with:
-          sort-paths: fms-extras
+          sort-paths: fms_extras
 
