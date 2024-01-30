@@ -35,7 +35,7 @@ from fms.utils.tokenizers import _has_hf, get_tokenizer  # type: ignore
 
 
 @dataclass
-class SphinxConfig(ModelConfig):
+class CalicoConfig(ModelConfig):
     src_vocab_size: int = 65024  # can be set by tokenizer
     emb_dim: int = 4608
     norm_eps: float = 1e-5
@@ -51,9 +51,9 @@ class SphinxConfig(ModelConfig):
     ntk_scaling: bool = False
 
 
-class SphinxBlock(nn.Module):
-    def __init__(self, config: SphinxConfig, rotary_emb: RotaryEmbedding):
-        super(SphinxBlock, self).__init__()
+class CalicoBlock(nn.Module):
+    def __init__(self, config: CalicoConfig, rotary_emb: RotaryEmbedding):
+        super(CalicoBlock, self).__init__()
         self.config = config
         emb_kq = self.config.emb_dim // self.config.nheads
         emb_v = self.config.emb_dim // self.config.nheads
@@ -159,25 +159,25 @@ class SphinxBlock(nn.Module):
             return x
 
 
-class Sphinx(nn.Module):
+class Calico(nn.Module):
     """
     This is an IBM model similar to LLaMA with a few key differences:
 
-    - Sphinx ties the weights of the input/output embeddings
-    - Sphinx adds a bias to attention and mlp
+    - Calico ties the weights of the input/output embeddings
+    - Calico adds a bias to attention and mlp
     """
 
     def __init__(
         self,
-        config: Optional[SphinxConfig] = None,
+        config: Optional[CalicoConfig] = None,
         distributed_strategy: DistributedStrategy = NoOpStrategy,
         **kwargs,
     ):
-        super(Sphinx, self).__init__()
+        super(Calico, self).__init__()
         if config is not None:
             self.config = config
         else:
-            self.config = SphinxConfig()
+            self.config = CalicoConfig()
         self.config = self.config.updated(**kwargs)
         self.distributed_strategy = distributed_strategy
 
@@ -213,7 +213,7 @@ class Sphinx(nn.Module):
 
         layers = []
         for i in range(self.config.nlayers):
-            block = SphinxBlock(self.config, self.rot_emb)
+            block = CalicoBlock(self.config, self.rot_emb)
             block = self.distributed_strategy.distribute_layer(block, i)
             layers.append(block)
         self.layers = nn.ModuleList(layers)
@@ -235,11 +235,11 @@ class Sphinx(nn.Module):
 
         self.reset_params()
 
-    def get_config(self) -> SphinxConfig:
+    def get_config(self) -> CalicoConfig:
         return self.config
 
     @classmethod
-    def from_config(cls, config: SphinxConfig) -> "Sphinx":
+    def from_config(cls, config: CalicoConfig) -> "Calico":
         return cls(config)
 
     def reset_params(self):
@@ -337,7 +337,7 @@ class Sphinx(nn.Module):
             return preds
 
 
-_1b_config = SphinxConfig(
+_1b_config = CalicoConfig(
     src_vocab_size=50304,
     emb_dim=2048,
     nheads=16,
@@ -349,7 +349,7 @@ _1b_config = SphinxConfig(
     max_expected_seq_len=2048,
 )
 
-_8b_config = SphinxConfig(
+_8b_config = CalicoConfig(
     src_vocab_size=65024,
     emb_dim=4608,
     nheads=36,
@@ -361,7 +361,7 @@ _8b_config = SphinxConfig(
     max_expected_seq_len=4096,
 )
 
-_13b_config = SphinxConfig(
+_13b_config = CalicoConfig(
     src_vocab_size=65024,
     emb_dim=5120,
     nheads=40,
@@ -373,21 +373,21 @@ _13b_config = SphinxConfig(
     max_expected_seq_len=4096,
 )
 
-_architecture_name = "sphinx"
+_architecture_name = "calico"
 
 
-def _sphinx_factory_factory(config):
+def _calico_factory_factory(config):
     def factory(**kwargs):
-        return Sphinx(config, **kwargs)
+        return Calico(config, **kwargs)
 
     return factory
 
 
-models.register_model(_architecture_name, "1b", _sphinx_factory_factory(_1b_config))
+models.register_model(_architecture_name, "1b", _calico_factory_factory(_1b_config))
 
-models.register_model(_architecture_name, "8b", _sphinx_factory_factory(_8b_config))
+models.register_model(_architecture_name, "8b", _calico_factory_factory(_8b_config))
 
-models.register_model(_architecture_name, "13b", _sphinx_factory_factory(_13b_config))
+models.register_model(_architecture_name, "13b", _calico_factory_factory(_13b_config))
 
 
 def _megatron_sd_to_fms_sd(hf_sd: Mapping[Any, Any]) -> Mapping[Any, Any]:
@@ -495,4 +495,4 @@ def _megatron_sd_to_fms_sd(hf_sd: Mapping[Any, Any]) -> Mapping[Any, Any]:
     return new_sd
 
 
-serialization.register_adapter("sphinx", "megatron", _megatron_sd_to_fms_sd)
+serialization.register_adapter("calico", "megatron", _megatron_sd_to_fms_sd)

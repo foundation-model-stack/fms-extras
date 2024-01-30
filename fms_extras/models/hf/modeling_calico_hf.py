@@ -7,11 +7,11 @@ from fms.models.hf.modeling_hf_adapter import HFDecoder, HFDecoderModelArchitect
 from transformers import PretrainedConfig
 from transformers.modeling_outputs import BaseModelOutputWithPastAndCrossAttentions
 
-from fms_extras.models.sphinx import Sphinx, SphinxConfig
+from fms_extras.models.calico import Calico, CalicoConfig
 
 
-class HFAdaptedSphinxConfig(PretrainedConfig):
-    model_type = "hf_adapted_sphinx"
+class HFAdaptedCalicoConfig(PretrainedConfig):
+    model_type = "hf_adapted_calico"
     attribute_map = {
         "vocab_size": "src_vocab_size",
         "hidden_size": "emb_dim",
@@ -74,16 +74,16 @@ class HFAdaptedSphinxConfig(PretrainedConfig):
         return cls.from_dict(config_dict, **kwargs)
 
     @classmethod
-    def from_fms_config(cls, config: SphinxConfig, **hf_kwargs):
+    def from_fms_config(cls, config: CalicoConfig, **hf_kwargs):
         config_dict = config.as_dict()
         config_dict["pad_token_id"] = config_dict.pop("pad_id")
         return cls.from_dict(config_dict, **hf_kwargs)
 
 
-class HFAdaptedSphinxDecoder(HFDecoder):
-    """Adapter for the sphinx decoder"""
+class HFAdaptedCalicoDecoder(HFDecoder):
+    """Adapter for the Calico decoder"""
 
-    def __init__(self, model: Sphinx, config: PretrainedConfig):
+    def __init__(self, model: Calico, config: PretrainedConfig):
         super().__init__(model, config, attention_mask_dim=3)
 
     def _adapt(
@@ -116,12 +116,12 @@ class HFAdaptedSphinxDecoder(HFDecoder):
         )
 
 
-class HFAdaptedSphinxHeadless(HFDecoderModelArchitecture):
-    """This is the Adapter for the base sphinx architecture"""
+class HFAdaptedCalicoHeadless(HFDecoderModelArchitecture):
+    """This is the Adapter for the base Calico architecture"""
 
     # attributes required by HF
-    config_class = HFAdaptedSphinxConfig
-    base_model_prefix = "hf_adapted_sphinx"
+    config_class = HFAdaptedCalicoConfig
+    base_model_prefix = "hf_adapted_calico"
 
     def __init__(
         self,
@@ -134,12 +134,12 @@ class HFAdaptedSphinxHeadless(HFDecoderModelArchitecture):
         # in the case we have not yet received the encoder/decoder/embedding, initialize it here
         if decoder is None or embedding is None:
             params = config.to_dict()
-            model = Sphinx(pad_id=params.pop("pad_token_id"), **params)
+            model = Calico(pad_id=params.pop("pad_token_id"), **params)
             decoder = model if decoder is None else decoder
             embedding = model.shared.emb if embedding is None else embedding
 
         # these are now huggingface compatible
-        decoder = HFAdaptedSphinxDecoder(decoder, config)
+        decoder = HFAdaptedCalicoDecoder(decoder, config)
         super().__init__(decoder, embedding, config, *args, **kwargs)
 
     def _prepare_inputs_for_generation(
@@ -151,7 +151,7 @@ class HFAdaptedSphinxHeadless(HFDecoderModelArchitecture):
         **model_kwargs,
     ) -> dict:
         """
-        Overriding _prepare_inputs_for_generation to include position_ids requirements for sphinx batch processing
+        Overriding _prepare_inputs_for_generation to include position_ids requirements for Calico batch processing
         """
         position_ids = model_kwargs.pop("position_ids", None)
 
@@ -175,17 +175,17 @@ class HFAdaptedSphinxHeadless(HFDecoderModelArchitecture):
         }
 
 
-class HFAdaptedSphinxForCausalLM(LMHeadModelLMHeadMixin, HFAdaptedSphinxHeadless):
+class HFAdaptedCalicoForCausalLM(LMHeadModelLMHeadMixin, HFAdaptedCalicoHeadless):
     _keys_to_ignore_on_load_missing = [r"lm_head.weight"]
     _tied_weights_keys = ["embedding.weight", "lm_head.weight"]
 
-    def __init__(self, config: HFAdaptedSphinxConfig, *args, **kwargs):
+    def __init__(self, config: HFAdaptedCalicoConfig, *args, **kwargs):
         super().__init__(config=config, bias=False, *args, **kwargs)
 
     @classmethod
     def _hf_model_from_fms(
-        cls, model: Sphinx, config: HFAdaptedSphinxConfig
-    ) -> "HFAdaptedSphinxForCausalLM":
+        cls, model: Calico, config: HFAdaptedCalicoConfig
+    ) -> "HFAdaptedCalicoForCausalLM":
         return cls(
             config=config,
             decoder=model,

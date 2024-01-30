@@ -8,23 +8,23 @@ from fms.testing._internal.model_test_suite import (
     ModelFixtureMixin,
 )
 
-from fms_extras.models.sphinx import Sphinx, SphinxConfig
+from fms_extras.models.calico import Calico, CalicoConfig
 
 
-class SphinxFixtures(ConfigFixtureMixin, ModelFixtureMixin):
+class CalicoFixtures(ConfigFixtureMixin, ModelFixtureMixin):
     """
-    Base Sphinx Fixtures that can be re-used for other purposes
+    Base Calico Fixtures that can be re-used for other purposes
 
     This will include the config and model signatures
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def uninitialized_model(self, config: SphinxConfig):
-        return Sphinx(config)
+    def uninitialized_model(self, config: CalicoConfig):
+        return Calico(config)
 
     @pytest.fixture(scope="class", autouse=True)
-    def config(self) -> SphinxConfig:
-        return SphinxConfig(
+    def config(self) -> CalicoConfig:
+        return CalicoConfig(
             src_vocab_size=384,
             emb_dim=16,
             norm_eps=1e-5,
@@ -39,14 +39,14 @@ class SphinxFixtures(ConfigFixtureMixin, ModelFixtureMixin):
         )
 
 
-class TestSphinx(
+class TestCalico(
     ModelConfigTestSuite,
     ModelConsistencyTestSuite,
     ModelCompileTestSuite,
-    SphinxFixtures,
+    CalicoFixtures,
 ):
     """
-    Model Test Suite for Sphinx
+    Model Test Suite for Calico
 
     This suite will include tests for:
     - model configuration
