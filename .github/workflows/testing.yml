@@ -24,8 +24,6 @@ jobs:
         pip install pytest numpy
         pip install transformers==4.35.0
         pip install safetensors
-        pip install pyarrow
-        pip install lm_eval
         pip install .
         
     - name: Test with pytest
