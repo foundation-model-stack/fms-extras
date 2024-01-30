@@ -8,23 +8,23 @@ from typing import Any, Mapping, Optional, OrderedDict
 
 import torch
 import torch.nn as nn
-from fms import models
-from fms.distributed.strategy import (
+from fms import models  # type: ignore
+from fms.distributed.strategy import (  # type: ignore
     DistributedStrategy,
     NoOpStrategy,
     TensorParallelStrategy,
     UniformModelParallelStrategy,
 )
-from fms.modules.attention import MultiHeadAttention
-from fms.modules.embedding import WordEmbedding
-from fms.modules.feedforward import GatedLinearUnit
-from fms.modules.layernorm import LayerNormParameterized
-from fms.modules.positions import RotaryEmbedding
-from fms.utils import serialization
-from fms.utils.activation import str_to_activation
-from fms.utils.config import ModelConfig
-from fms.utils.serialization import FusableWeightsMissingError
-from fms.utils.tokenizers import _has_hf, get_tokenizer
+from fms.modules.attention import MultiHeadAttention  # type: ignore
+from fms.modules.embedding import WordEmbedding  # type: ignore
+from fms.modules.feedforward import GatedLinearUnit  # type: ignore
+from fms.modules.layernorm import LayerNormParameterized  # type: ignore
+from fms.modules.positions import RotaryEmbedding  # type: ignore
+from fms.utils import serialization  # type: ignore
+from fms.utils.activation import str_to_activation  # type: ignore
+from fms.utils.config import ModelConfig  # type: ignore
+from fms.utils.serialization import FusableWeightsMissingError  # type: ignore
+from fms.utils.tokenizers import _has_hf, get_tokenizer  # type: ignore
 
 
 # params emb_dim heads layers lr
@@ -211,12 +211,12 @@ class Sphinx(nn.Module):
                 self.shared.emb.weight.device, self.config.max_expected_seq_len
             )
 
-        self.layers = []
+        layers = []
         for i in range(self.config.nlayers):
             block = SphinxBlock(self.config, self.rot_emb)
             block = self.distributed_strategy.distribute_layer(block, i)
-            self.layers.append(block)
-        self.layers = nn.ModuleList(self.layers)
+            layers.append(block)
+        self.layers = nn.ModuleList(layers)
 
         dec_norm = LayerNormParameterized(
             self.config.emb_dim,
