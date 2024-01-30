@@ -22,7 +22,7 @@ def test_calico_equivalence():
 
     device = "cpu"
     # path to GPTMegatronForCausalLM weights
-    path = "/Users/joshuarosenkranz/Desktop/granite/granite-gqa-rope-swiglu-rmsnorm-1b-100k"
+    path = ""
     # 1b, 8b, or 13b
     variant = "1b"
 
