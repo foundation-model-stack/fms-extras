@@ -163,8 +163,8 @@ class Sphinx(nn.Module):
     """
     This is an IBM model similar to LLaMA with a few key differences:
 
-    - tie heads is set to True
-    - adding use_bias to attn and mlp
+    - Sphinx ties the weights of the input/output embeddings
+    - Sphinx adds a bias to attention and mlp
     """
     def __init__(
         self,
