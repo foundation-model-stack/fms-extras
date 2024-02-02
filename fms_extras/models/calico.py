@@ -8,23 +8,23 @@ from typing import Any, Mapping, Optional, OrderedDict
 
 import torch
 import torch.nn as nn
-from fms import models  # type: ignore
-from fms.distributed.strategy import (  # type: ignore
+from fms import models
+from fms.distributed.strategy import (
     DistributedStrategy,
     NoOpStrategy,
     TensorParallelStrategy,
     UniformModelParallelStrategy,
 )
-from fms.modules.attention import MultiHeadAttention  # type: ignore
-from fms.modules.embedding import WordEmbedding  # type: ignore
-from fms.modules.feedforward import GatedLinearUnit  # type: ignore
-from fms.modules.layernorm import LayerNormParameterized  # type: ignore
-from fms.modules.positions import RotaryEmbedding  # type: ignore
-from fms.utils import serialization  # type: ignore
-from fms.utils.activation import str_to_activation  # type: ignore
-from fms.utils.config import ModelConfig  # type: ignore
-from fms.utils.serialization import FusableWeightsMissingError  # type: ignore
-from fms.utils.tokenizers import _has_hf, get_tokenizer  # type: ignore
+from fms.modules.attention import MultiHeadAttention
+from fms.modules.embedding import WordEmbedding
+from fms.modules.feedforward import GatedLinearUnit
+from fms.modules.layernorm import LayerNormParameterized
+from fms.modules.positions import RotaryEmbedding
+from fms.utils import serialization
+from fms.utils.activation import str_to_activation
+from fms.utils.config import ModelConfig
+from fms.utils.serialization import FusableWeightsMissingError
+from fms.utils.tokenizers import _has_hf, get_tokenizer
 
 
 # params emb_dim heads layers lr
@@ -202,7 +202,7 @@ class Calico(nn.Module):
             max_seq_len=self.config.max_expected_seq_len,
         )
         if isinstance(self.distributed_strategy, UniformModelParallelStrategy):
-            for dev_idx in set(self.distributed_strategy.layer_to_device.values()):
+            for dev_idx in set(self.distributed_strategy.layer_to_device):
                 self.rot_emb.compute_freqs_cis(
                     torch.device("cuda", dev_idx), self.config.max_expected_seq_len
                 )
@@ -214,8 +214,8 @@ class Calico(nn.Module):
         layers = []
         for i in range(self.config.nlayers):
             block = CalicoBlock(self.config, self.rot_emb)
-            block = self.distributed_strategy.distribute_layer(block, i)
-            layers.append(block)
+            block_module = self.distributed_strategy.distribute_layer(block, i)
+            layers.append(block_module)
         self.layers = nn.ModuleList(layers)
 
         dec_norm = LayerNormParameterized(
