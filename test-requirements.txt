@@ -1,0 +1,14 @@
+# This requirements file is for test jobs.
+# It pulls in general dependencies from fms-extras-requirements.txt
+# as well as test-only dependencies
+
+-r fms-extras-requirements.txt
+
+# Test tools
+mypy==1.8.0
+mypy-extensions==1.0.0
+pytest==8.0.0
+
+# Types packages
+pyarrow-stubs==10.0.1.7
+types-requests==2.31.0.20240125

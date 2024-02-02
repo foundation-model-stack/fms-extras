@@ -1,0 +1,8 @@
+# This requirement files can be used for development purposes, as it points to an
+# unreleased version (the main branch) for the ibm-fms package
+# It pins all other fms-extra dependencies to a specific version
+# for repeatable installs
+
+accelerate==0.26.1
+
+ibm-fms @ git+https://github.com/foundation-model-stack/foundation-model-stack@main
