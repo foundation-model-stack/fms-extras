@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from fms.modules import LayerNormParameterized
 
 class Speculator(nn.Module):
-    def __init__(self, emb_dim=4096, inner_dim=0, vocab_size=32000, n_heads=4):
+    def __init__(self, emb_dim=4096, inner_dim=0, vocab_size=32000, n_heads=3):
         super().__init__()
         self.nheads = n_heads
         self.emb_dim = emb_dim
@@ -17,6 +17,7 @@ class Speculator(nn.Module):
         self.ln = nn.ModuleList(
             [LayerNormParameterized(inner_dim, elementwise_shift=True, elementwise_scale=True) for _ in range(n_heads)]
         )
+        # Weights ensure that state_0 accounts for 50% of state magnitude by final head in expectation
         self.state_weight = .5**(.5/n_heads)
         self.emb_weight = (1-self.state_weight**2)**.5
         self.a = nn.GELU()
