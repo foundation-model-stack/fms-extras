@@ -6,7 +6,7 @@ from fms.modules.layernorm import LayerNormParameterized
 class Speculator(nn.Module):
     def __init__(self, emb_dim=4096, inner_dim=0, vocab_size=32000, n_predict=3):
         super().__init__()
-        self.npredict = n_predict
+        self.n_predict = n_predict
         self.emb_dim = emb_dim
         inner_dim = inner_dim if inner_dim!=0 else emb_dim
         self.inner_dim = inner_dim
@@ -84,7 +84,7 @@ class Speculator(nn.Module):
         # state: b n d
         # inds: b n+h (..., pred token, n+2, n+3, n+4)
         out = []
-        for i in range(self.npredict):
+        for i in range(self.n_predict):
             z = self.emb[i](inds[:, i : i + state.size(1)]).mul(self.emb_weight*(self.inner_dim/2)**.5)  # b n d
             state = self.a(self.ln[i](self.proj[i](state)*self.state_weight+z))  # b n d
             out.append(self.head[i](state))  # b n v
