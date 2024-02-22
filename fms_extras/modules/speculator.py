@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from fms.modules import LayerNormParameterized
+from fms.modules.layernorm import LayerNormParameterized
 
 class Speculator(nn.Module):
     def __init__(self, emb_dim=4096, inner_dim=0, vocab_size=32000, n_heads=3):
