@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from fms.modules.layernorm import LayerNormParameterized
-from typing import List, Int
+from typing import List
 
 
 class MLPSpeculator(nn.Module):
@@ -75,7 +75,7 @@ class MLPSpeculator(nn.Module):
         self,
         state: torch.Tensor,
         ind: torch.Tensor,
-        topk: List[Int] = [5, 4, 3],
+        topk: List[int] = [5, 4, 3],
         n: int = 5,
     ) -> torch.Tensor:
         """
