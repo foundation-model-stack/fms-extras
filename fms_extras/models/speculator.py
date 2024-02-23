@@ -4,16 +4,18 @@ import torch.nn as nn
 import torch.nn.functional as F
 from fms.modules.layernorm import LayerNormParameterized
 
-class MLP_Speculator(nn.Module):
+class MLPSpeculator(nn.Module):
     """
-    This is a simple MLP-based speculator that functions similarly to Medusa, ingesting context via
-    the final embedding vector from the base model. However, this model also conditions on previously
-    predicted tokens, similarly to an RNN, allowing it to generate better-quality n-grams. 
+    This is a simple MLP-based speculator that functions similarly to Medusa
+    (https://arxiv.org/abs/2401.10774), ingesting context via the final embedding
+    vector from the base model. However, this model also conditions on previously
+    predicted tokens, similarly to an RNN, allowing it to generate better-quality n-grams.
 
-    The architecture is as flat and simple as possible: for each prediction head, the current 
-    state vector is projected into a new latent space and added to the previous token's embedding. 
-    This sum goes through layernorm and activation, forming the new state vector. This state predicts
-    the next token (or set of candidate tokens) for the current head, and then is passed on to the next.
+    The architecture is as flat and simple as possible: for each prediction head,
+    the current state vector is projected into a new latent space and added to the
+    previous token's embedding. This sum goes through layernorm and activation, forming
+    the new state vector. This state predicts the next token (or set of candidate tokens)
+    for the current head, and then is passed on to the next.
     ...
     Args
     ----
@@ -31,24 +33,32 @@ class MLP_Speculator(nn.Module):
         super().__init__()
         self.n_predict = n_predict
         self.emb_dim = emb_dim
-        inner_dim = inner_dim if inner_dim!=0 else emb_dim
+        inner_dim = inner_dim if inner_dim != 0 else emb_dim
         self.inner_dim = inner_dim
         self.vsize = vocab_size
         self.emb = nn.ModuleList(
             [nn.Embedding(vocab_size, inner_dim) for _ in range(n_predict)]
         )
         self.proj = nn.ModuleList(
-            [nn.Linear((emb_dim if i==0 else inner_dim), inner_dim, bias=False) for i in range(n_predict)]
+            [
+                nn.Linear((emb_dim if i==0 else inner_dim), inner_dim, bias=False)
+                for i in range(n_predict)
+            ]
         )
         self.head = nn.ModuleList(
             [nn.Linear(inner_dim, vocab_size, bias=False) for _ in range(n_predict)]
         )
         self.ln = nn.ModuleList(
-            [LayerNormParameterized(inner_dim, elementwise_shift=True, elementwise_scale=True) for _ in range(n_predict)]
+            [
+                LayerNormParameterized(
+                    inner_dim, elementwise_shift=True, elementwise_scale=True
+                )
+                for _ in range(n_predict)
+            ]
         )
         # Weights ensure that state_0 accounts for 50% of state magnitude by final head in expectation
-        self.state_weight = .5**(.5/n_predict)
-        self.emb_weight = math.sqrt(1-self.state_weight**2)
+        self.state_weight = 0.5 ** (0.5 / n_predict)
+        self.emb_weight = math.sqrt(1 - self.state_weight**2)
         self.activation = nn.GELU()
 
     def reset_parameters(self):
