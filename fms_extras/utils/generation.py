@@ -4,7 +4,7 @@ from typing import Union, Callable, List, MutableMapping, Any, Optional
 import torch
 import torch.nn.functional as F
 
-from fms_extras.modules.speculator import Speculator
+from fms_extras.models.speculator import MLPSpeculator
 from fms_extras.utils.cache import select_inflate_dim, flatten_batch
 from fms_extras.utils.cache.paged import PagedKVCacheManager
 
@@ -12,7 +12,7 @@ from fms_extras.utils.cache.paged import PagedKVCacheManager
 def speculative_generate(
     model: Union[Callable, torch.nn.Module],
     input_ids: Union[torch.Tensor, List[torch.Tensor]],
-    speculator: Speculator,
+    speculator: MLPSpeculator,
     max_seq_len: int = 2048,
     new_tokens: int = 256,
     top_k: int = 5,
@@ -235,12 +235,6 @@ def speculative_generate(
         ]
         input_ids = torch.stack([line[-1:] for line in next_vals_split], dim=0)  # b 1
 
-    for parent_sequence_id in parent_sequence_ids:
-        prefix = kv_cache_manager.cbg_map[parent_sequence_id].prefix
-        kv_cache_manager.free(parent_sequence_id)
-        while prefix is not None:
-            kv_cache_manager.free(prefix.sequence_id)
-            prefix = prefix.prefix
-
+    kv_cache_manager.free_sequences(parent_sequence_ids, recursive=True)
     end_time = time.time()
     return result, n_steps, (end_time - start_time)

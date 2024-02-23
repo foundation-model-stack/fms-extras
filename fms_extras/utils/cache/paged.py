@@ -732,9 +732,17 @@ class PagedKVCacheManager(KVCacheManager):
         self.unused_keys.put_nowait(sequence_id)
         del self.cbg_map[sequence_id]
 
-    def free_sequences(self, sequence_ids: List[int]):
+    def free_sequences(self, sequence_ids: List[int], recursive: bool = False):
         for seq_id in sequence_ids:
+            prefix_cbg = self.cbg_map[seq_id].prefix if recursive else None
             self.free(seq_id)
+            while prefix_cbg is not None:
+                # only free a prefix if its refcount is 0, otherwise it is still being used by another sequence
+                if prefix_cbg.ref_count == 0:
+                    self.free(prefix_cbg.sequence_id)
+                prefix_cbg = prefix_cbg.prefix
+
+
 
     def _get_unassigned_sequence_id(self) -> int:
         return self._get_unassigned_sequence_ids(1)[0]

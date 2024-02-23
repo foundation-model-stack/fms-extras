@@ -9,16 +9,12 @@ from torch import distributed as dist
 
 from fms.models import get_model
 from fms.utils import generation, tokenizers
-from fms_extras.modules.speculator import Speculator
+from fms_extras.models.speculator import MLPSpeculator
 from fms_extras.utils.generation import speculative_generate
 import fms_extras.models.paged_llama
 
 # This example script validates the LLaMA implementation by running inference on a couple of prompts.
-#
-# Example usage with single-GPU 7B model on slurm, with torch.compile and determinstic behavior:
-# CUBLAS_WORKSPACE_CONFIG=:4096:8 srun -N 1 --gres=gpu:1 python scripts/inference.py --model_path=~/models/7B-F/ --tokenizer=~/models/tokenizer.model --compile --deterministic
-# Example usage of 13B model on 2 GPUs with Tensor Parallel:
-# srun -N 1 --gres=gpu:2 torchrun --nproc_per_node=2 scripts/inference.py --model_path=~/models/13B-F --tokenizer=~/models/tokenizer.model --distributed
+# torchrun --nproc_per_node=1 scripts/inference.py --variant=7b --model_path=~/models/7B-F --tokenizer=~/models/tokenizer.model --model_source=meta --speculator_path=~/models/speculator_7B_F.pth --compile
 
 parser = argparse.ArgumentParser(
     description="Script to run inference on a causal model"
@@ -94,7 +90,6 @@ if args.device_type == "cuda":
 else:
     device = torch.device(args.device_type)
 
-# torch.set_default_device(device)
 torch.set_default_dtype(torch.half)
 
 # requires setting environment variable: `CUBLAS_WORKSPACE_CONFIG=:4096:8`
@@ -130,7 +125,7 @@ tokenizer = tokenizers.get_tokenizer(args.tokenizer)
 model.eval()
 torch.set_grad_enabled(False)
 print("loading speculator")
-speculator = Speculator(model.width, 4096, model.config.src_vocab_size, n_predict=3)
+speculator = MLPSpeculator(model.width, 4096, model.config.src_vocab_size, n_predict=3)
 speculator.load_state_dict(
     torch.load(args.speculator_path, map_location=device)["model_state"]
 )
@@ -236,8 +231,8 @@ prompt2 = ids_for_prompt(prompt2)
 prompt3 = ids_for_prompt(prompt3)
 prompt4 = ids_for_prompt(prompt4)
 
-# ids = [prompt1, prompt2, prompt3, prompt4]
-ids = [prompt1]
+ids = [prompt1, prompt2, prompt3, prompt4]
+# ids = [prompt1]
 
 infer(ids, warmup=True)
 print("generating output", local_rank)
