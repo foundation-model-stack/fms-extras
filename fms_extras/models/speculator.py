@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from fms.modules.layernorm import LayerNormParameterized
-from Typing import List, Int
+from typing import List, Int
 
 class MLPSpeculator(nn.Module):
     """
@@ -42,7 +42,7 @@ class MLPSpeculator(nn.Module):
         )
         self.proj = nn.ModuleList(
             [
-                nn.Linear((emb_dim if i==0 else inner_dim), inner_dim, bias=False)
+                nn.Linear((emb_dim if i == 0 else inner_dim), inner_dim, bias=False)
                 for i in range(n_predict)
             ]
         )
@@ -96,8 +96,8 @@ class MLPSpeculator(nn.Module):
             Given the final tree of prod(topk) candidates, return only the top n most confident.
         ...
         Output : torch.Tensor
-            The tensor of most likely candidate sequences. 
-            Has size [b n self.n_predict], where b is batch size and n is provided above. 
+            The tensor of most likely candidate sequences.
+            Has size [b n self.n_predict], where b is batch size and n is provided above.
         """
         # k indicates # of candidates
         # h indicates # of generated tokens
