@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from fms.modules.layernorm import LayerNormParameterized
+from Typing import List, Int
 
 class MLPSpeculator(nn.Module):
     """
@@ -69,16 +70,35 @@ class MLPSpeculator(nn.Module):
                 m.weight.data.fill_(1)
                 m.bias.data.zero_()
 
-    def generate_suffixes(self, state, ind, topk=[5, 4, 3], n=5):
+    def generate_suffixes(
+        self,
+        state: torch.Tensor,
+        ind: torch.Tensor,
+        topk: List[Int] = [5, 4, 3],
+        n: int = 5,
+    ) -> torch.Tensor:
         """
         FOR INFERENCE
+        Generate tree of candidate sequences.
+        ...
+        Args
         ----
-        Generate tree of candidate sequences given latest base model embedding (state) and chosen token (ind).
-        Topk indicates # of tree "branches" at each head.
-        n pares down the candidate list from prod(topk) to the top n most confident.
+        state : torch.Tensor
+            Most recent embedding vector from the base model (pre-classification head).
+            Expects size [b 1 d] where b is batch size and d is model width.
+        ind : torch.Tensor
+            Token indices of the base model's most recent predicted token(s).
+            Expects size [b 1] where b is batch size.
+        topk : List(int)
+            Number of tokens to consider from each head when forming the candidate tree.
+            For each candidate branch in the tree, head n produces topk[n] additional sub-branches.
+        n : int
+            Given the final tree of prod(topk) candidates, return only the top n most confident.
+        ...
+        Output : torch.Tensor
+            The tensor of most likely candidate sequences. 
+            Has size [b n self.n_predict], where b is batch size and n is provided above. 
         """
-        # state: b 1 d
-        # ind: b 1
         # k indicates # of candidates
         # h indicates # of generated tokens
         b = state.size(0)
@@ -114,16 +134,32 @@ class MLPSpeculator(nn.Module):
             1, best_guesses.unsqueeze(2).expand(-1, -1, self.n_predict)
         )  # b n h
 
-    def forward(self, state, inds):
+    def forward(
+        self,
+        state: torch.Tensor,
+        inds: torch.Tensor,
+    ) -> torch.Tensor:
         """
         FOR TRAINING
-        ----
-        Since we're assuming all prior tokens are "correct", don't act recursively, just pull from provided inds.
+        A parallel forward pass on pre-existing ground-truth tokens in pretraining contexts.
         Produces self.n_predict predicted tokens for each token embedding in state.
-        Inds requires self.n_predict extra tokens on the right to "simulate" recursive behavior for end positions.
+        Inds requires self.n_predict extra tokens on the right to "simulate" recursive
+        behavior for end positions.
+        ...
+        Args
+        ----
+        state : torch.Tensor
+            Embedding vectors from the base model for a given sequence.
+            Expects size [b n d] where b is batch size, n is seq len, and d is model width.
+        inds : torch.Tensor
+            Ground-truth token indices. inds[:,i] is the prediction coming from state[:,i]
+            (or the legal fiction ground truth corresponding to that prediction).
+            Expects size [b n+self.n_predict].
+        ...
+        Output : torch.Tensor
+            Prediction logits at each position, for each head of the speculator.
+            Has size [self.n_predict b n v] where v is vocab size.
         """
-        # state: b n d
-        # inds: b n+h (..., pred token, n+2, n+3, n+4)
         out = []
         for i in range(self.n_predict):
             z = self.emb[i](inds[:, i : i + state.size(1)])
