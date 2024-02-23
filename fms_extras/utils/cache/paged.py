@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Tuple, Union
 import torch
 import torch._inductor.ir as ir
 import torch._inductor.lowering as lowering
+from torch._dynamo import mark_static_address
 from torch._inductor.virtualized import V
 
 from fms_extras.paged_c import attn_ops, cache_ops  # type: ignore
@@ -257,42 +258,6 @@ def _paged_attention_v1_lowering(
         mutated_inputs=[out],
     )
     return out
-
-
-# Available starting PT 2.2
-# class NoneLayout(ir.IRNode):
-#     def __init__(self, device):
-#         self.device = device
-#         self.size = [0]
-#         self.stride = [0]
-#
-#     def storage_size(self):
-#         return 0
-#
-#     def as_fixed(self):
-#         return self
-
-
-# Available starting PT 2.2
-# class MutationOutput(ir.ExternKernel):
-#     def get_mutation_names(self):
-#         return [self.inputs[0].get_name()]
-#
-#     def __init__(self, layout, input, parent):
-#         super().__init__(None, layout, [input, parent], ())
-#         self.name = V.graph.register_buffer(self)
-#
-#     def should_allocate(self):
-#         return False
-#
-#     def is_no_op(self):
-#         return True
-#
-#     def has_side_effects(self):
-#         return True
-#
-#     def get_alias_names(self):
-#         return [self.inputs[0].get_name()]
 
 
 class PagedAttnKernel(ir.FallbackKernel):
@@ -695,6 +660,8 @@ class PagedKVCacheManager(KVCacheManager):
                 dtype=dtype,
                 device=self.device,
             )
+            mark_static_address(key_blocks)
+            mark_static_address(value_blocks)
             self.cache.append((key_blocks, value_blocks))
 
         self.free_blocks: List[CacheBlock] = []

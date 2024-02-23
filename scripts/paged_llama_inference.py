@@ -130,7 +130,7 @@ tokenizer = tokenizers.get_tokenizer(args.tokenizer)
 model.eval()
 torch.set_grad_enabled(False)
 print("loading speculator")
-speculator = Speculator(model.width, model.config.src_vocab_size, n_predict=3)
+speculator = Speculator(model.width, 4096, model.config.src_vocab_size, n_predict=3)
 speculator.load_state_dict(
     torch.load(args.speculator_path, map_location=device)["model_state"]
 )
@@ -236,10 +236,8 @@ prompt2 = ids_for_prompt(prompt2)
 prompt3 = ids_for_prompt(prompt3)
 prompt4 = ids_for_prompt(prompt4)
 
-max_len = max([len(prompt) for prompt in [prompt1, prompt2, prompt3, prompt4]])
-
-
-ids = [prompt1]#, prompt2, prompt3, prompt4]
+# ids = [prompt1, prompt2, prompt3, prompt4]
+ids = [prompt1]
 
 infer(ids, warmup=True)
 print("generating output", local_rank)
