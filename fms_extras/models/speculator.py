@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from fms.modules.layernorm import LayerNormParameterized
 from typing import List, Int
 
+
 class MLPSpeculator(nn.Module):
     """
     This is a simple MLP-based speculator that functions similarly to Medusa
