@@ -1,9 +1,10 @@
 import math
+from typing import List
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from fms.modules.layernorm import LayerNormParameterized
-from typing import List
 
 
 class MLPSpeculator(nn.Module):
