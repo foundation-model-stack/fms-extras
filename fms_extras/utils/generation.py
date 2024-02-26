@@ -3,9 +3,10 @@ from typing import Union, Callable, List, MutableMapping, Any, Optional
 
 import torch
 import torch.nn.functional as F
-
+from torch import distributed as dist
 from fms_extras.models.speculator import MLPSpeculator
-from fms_extras.utils.cache import select_inflate_dim, flatten_batch
+from fms_extras.utils.cache import select_inflate_dim, flatten_batch, KVCacheManager
+from fms_extras.utils.cache.expandable import ExpandableKVCacheManager
 from fms_extras.utils.cache.paged import PagedKVCacheManager
 
 
@@ -238,3 +239,129 @@ def speculative_generate(
     kv_cache_manager.free_sequences(parent_sequence_ids, recursive=True)
     end_time = time.time()
     return result, n_steps, (end_time - start_time)
+
+def paged_generate(
+    model: Union[Callable, torch.nn.Module],
+    input_ids: torch.Tensor,
+    kv_cache_manager: Optional[PagedKVCacheManager],
+    max_seq_len: int = 2048,
+    max_new_tokens: int = 256,
+    temperature: float = 1.0,
+    top_k: int = 10,
+    do_sample: bool = True,
+    decode_model: Optional[Union[Callable, torch.nn.Module]] = None,
+):
+    """
+    A trivial generate function that can be used for validation/testing in
+    cases where HF is not available.
+    We could add implementations for other types of generation, but this is
+    enough for making sure a model is working.
+    Does not implement batching nor beam search, but those could be added.
+
+    Args:
+        model: A function or nn.Module that takes a batch of input_ids and
+            returns logits
+        prefix: A tensor of token IDs.
+        max_seq_len: the sequence length of the model
+        max_new_tokens: max tokens to generate
+        temperature: temperature of softmax when sampling
+        top_k: only search among top k tokens
+        do_sample: multinomial sampling. False for greedy.
+        num_beams: TODO: support beam search
+        use_cache: requires that the model accept use_cache and
+            past_key_value_states args in forward method.
+    """
+    if decode_model is None:
+        decode_model = model
+
+    bsize = len(input_ids)
+    # Build padded batched input tensor
+    max_len = max([seq.size(0) for seq in input_ids])
+    n_pads_init = [max_len - seq.size(0) for seq in input_ids]
+    input_ids = torch.stack(
+        [F.pad(input_ids[i], (n_pads_init[i], 0)) for i in range(bsize)]
+    )
+
+    result = input_ids
+    next_input = input_ids
+    kwargs: MutableMapping[str, Any] = dict()
+    kwargs["cache_data"] = None
+    kwargs["use_cache"] = True
+    sequence_ids: Optional[List[int]] = None
+
+    # comment out if you do not want to profile
+    # with torch.profiler.profile(
+    #         activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+    #         schedule=torch.profiler.schedule(
+    #             skip_first=5,
+    #             wait=0,
+    #             warmup=3,
+    #             active=1,
+    #             repeat=1,
+    #         ),
+    #         on_trace_ready=functools.partial(trace_handler, output_path="/net/storage149/mnt/md0/jmrosenk/trace_generate_fms_paged_attn", extra_name="0"),
+    #         with_stack=True,
+    #         profile_memory=True,
+    #         record_shapes=True,
+    # ) as prof:
+    # total_time = 0
+    for i in range(max_new_tokens):
+        input_ids = next_input[:, -max_seq_len:]
+
+        # compute the mask
+        if i == 0:
+            is_pad = input_ids == 0
+            mask = is_pad.unsqueeze(-1) == is_pad.unsqueeze(-2)
+            kwargs["mask"] = mask.tril(diagonal=0)
+        else:
+            if i == 1:
+                start_time = time.time()
+            kwargs["mask"] = None
+
+        # get the cache data and position ids if using cache
+        if sequence_ids is None:
+            num_tokens_per_sequence = torch.count_nonzero(
+                input_ids.T, dim=0
+            ).tolist()
+        else:
+            num_tokens_per_sequence = [1 for _ in range(input_ids.size(0))]
+
+        cache_data = kv_cache_manager.allocate_tokens(
+            num_tokens_per_sequence, sequence_ids
+        )
+
+        sequence_ids = cache_data.sequence_ids
+
+        kwargs["cache_data"] = cache_data
+        kwargs["position_ids"] = cache_data.compute_position_ids(
+            num_tokens_per_sequence
+        )
+
+        if i == 0:
+            logits, _ = model(input_ids, **kwargs)
+        else:
+            logits, _ = decode_model(input_ids, **kwargs)
+        logits = logits[:, -1, :]
+
+        if do_sample:
+            # get logits from last value in sequence nad scale
+            logits = logits / temperature
+            if top_k:
+                v, _ = torch.topk(logits, top_k)
+                logits[logits < v[:, [-1]]] = -float("inf")
+
+            probs = F.softmax(logits, dim=-1)
+            next_val = torch.multinomial(probs, num_samples=1)
+        else:
+            next_val = torch.argmax(logits, dim=-1).unsqueeze(0).t()
+
+        result = torch.cat((result, next_val), dim=-1)
+
+        next_input = next_val
+
+            # comment out if you do not want to profile
+            # prof.step()
+
+    kv_cache_manager.free_sequences(sequence_ids)  # type: ignore
+    end_time = time.time()
+    return result, max_new_tokens, (end_time - start_time)

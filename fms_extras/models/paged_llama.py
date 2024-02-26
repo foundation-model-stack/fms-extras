@@ -5,22 +5,26 @@ import re
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Optional, Tuple, MutableMapping
+from typing import Mapping, Optional, Tuple, MutableMapping, List
 
 import torch
 import torch.nn as nn
+from torch._C._distributed_c10d import ProcessGroup
 
-from fms import models
+from fms import models, distributed
 from fms.distributed.strategy import (
     DistributedStrategy,
     NoOpStrategy,
     UniformModelParallelStrategy,
 )
+from fms.distributed.tensorparallel import copy_to_tensor_model_parallel_region, \
+    reduce_from_tensor_model_parallel_region
 from fms.modules.attention import MultiHeadAttention
 from fms.modules.embedding import WordEmbedding
 from fms.modules.feedforward import GatedLinearUnit
 from fms.modules.layernorm import LayerNormParameterized
 from fms.modules.positions import RotaryEmbedding, PositionEncoder
+from fms.modules.tp import TPModule
 from fms.utils import serialization
 from fms.utils.activation import str_to_activation
 from fms.utils.config import ModelConfig
@@ -60,6 +64,9 @@ class PagedMultiHeadAttention(MultiHeadAttention):
                  position_encoder: Optional[PositionEncoder] = None, gain=1):
 
         super().__init__(emb_dim, emb_kq, emb_v, nheads, kvheads, p_dropout, use_bias, position_encoder, gain)
+
+    def to_tp(self, group: ProcessGroup) -> "TPPagedMultiHeadAttention":
+        return TPPagedMultiHeadAttention.import_module(self, group)
 
     def forward(
         self,
@@ -199,6 +206,113 @@ class PagedMultiHeadAttention(MultiHeadAttention):
             return out, cache_data_layer.data_layer
         else:
             return out
+
+class TPPagedMultiHeadAttention(PagedMultiHeadAttention, TPModule):
+
+    def __init__(
+        self,
+        emb_dim,
+        emb_kq,
+        emb_v,
+        nheads,
+        kvheads,
+        p_dropout=None,
+        use_bias=False,
+        position_encoder: Optional[PositionEncoder] = None,
+        gain=1,
+        group: Optional[ProcessGroup] = None,
+    ):
+        assert torch.distributed.is_initialized()
+
+        rank, world_size = distributed.rank_and_world(group)
+        assert (
+            nheads % world_size == 0
+        ), "The number of heads must be divisible by world size"
+        PagedMultiHeadAttention.__init__(
+            self,
+            emb_dim,
+            emb_kq,
+            emb_v,
+            nheads // world_size,
+            (kvheads // world_size) if kvheads > 1 else kvheads,
+            p_dropout,
+            use_bias,
+            position_encoder,
+            gain,
+        )
+        self.setup_tp(rank, world_size)
+
+    def colwise_param_names(self) -> List[str]:
+        colwise_weights = ["query"]
+        if self.kvheads != 1:
+            colwise_weights.append("key")
+            colwise_weights.append("value")
+        return colwise_weights
+
+    def rowwise_param_names(self) -> List[str]:
+        return ["dense"]
+
+    @staticmethod
+    def import_module(
+        mha: PagedMultiHeadAttention, group: ProcessGroup
+    ) -> "TPPagedMultiHeadAttention":
+        tp_mha = TPPagedMultiHeadAttention(
+            emb_dim=mha.emb_dim,
+            emb_kq=mha.emb_kq_per_head,
+            emb_v=mha.emb_v_per_head,
+            nheads=mha.nheads,
+            kvheads=mha.kvheads,
+            p_dropout=mha.p_dropout,
+            use_bias=mha.use_bias,
+            position_encoder=mha.position_encoder,
+            group=group,
+        )
+        return tp_mha
+
+    def forward(
+        self,
+        q,
+        k,
+        v,
+        mask=None,
+        position_ids=None,
+        attn_algorithm=None,
+        cache_data_layer=None,
+        use_cache=False,
+        is_self=True,
+        is_causal_mask=False,
+    ):
+        """
+        Check MultiHeadAttention for up-to-date arguments and docs
+        """
+
+        q_par = copy_to_tensor_model_parallel_region(q)
+        k_par = copy_to_tensor_model_parallel_region(k)
+        v_par = copy_to_tensor_model_parallel_region(v)
+
+        out_par = PagedMultiHeadAttention.forward(
+            self,
+            q_par,
+            k_par,
+            v_par,
+            mask,
+            position_ids,
+            attn_algorithm,
+            cache_data_layer,
+            use_cache,
+            is_self,
+            is_causal_mask,
+        )
+
+        # if use_cache=True, we return the hidden_state as well as the kv cache.
+        # We only reduce the output, and keep the cache thread-local
+        if use_cache:
+            out = reduce_from_tensor_model_parallel_region(out_par[0])
+            return out, out_par[1]
+        else:
+            out = reduce_from_tensor_model_parallel_region(out_par)
+            return out
+
 
 class PagedLLaMABlock(nn.Module):
     def __init__(self, config: PagedLLaMAConfig, rotary_emb: RotaryEmbedding):

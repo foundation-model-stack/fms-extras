@@ -10,7 +10,7 @@ from torch import distributed as dist
 from fms.models import get_model
 from fms.utils import generation, tokenizers
 from fms_extras.models.speculator import MLPSpeculator
-from fms_extras.utils.generation import speculative_generate
+from fms_extras.utils.generation import speculative_generate, paged_generate
 import fms_extras.models.paged_llama
 
 # This example script validates the LLaMA implementation by running inference on a couple of prompts.
@@ -34,7 +34,7 @@ parser.add_argument(
 parser.add_argument(
     "--speculator_path",
     type=str,
-    required=True,
+    default=None,
     help="Path to the checkpoint containing speculator weights (single .pth file, not HF weights)",
 )
 parser.add_argument(
@@ -124,13 +124,15 @@ decode_model = None
 tokenizer = tokenizers.get_tokenizer(args.tokenizer)
 model.eval()
 torch.set_grad_enabled(False)
-print("loading speculator")
-speculator = MLPSpeculator(model.width, 4096, model.config.src_vocab_size, n_predict=3)
-speculator.load_state_dict(
-    torch.load(args.speculator_path, map_location=device)["model_state"]
-)
-speculator = speculator.to(device)
-print("loading complete on rank", local_rank)
+speculator = None
+if args.speculator_path is not None:
+    print("loading speculator")
+    speculator = MLPSpeculator(model.width, 4096, model.config.src_vocab_size, n_predict=3)
+    speculator.load_state_dict(
+        torch.load(args.speculator_path, map_location=device)["model_state"]
+    )
+    speculator = speculator.to(device)
+    print("loading complete on rank", local_rank)
 
 print("initializing paged cache")
 # cache setup
@@ -155,17 +157,6 @@ def ids_for_prompt(prompt):
     ids = torch.tensor(ids, dtype=torch.long, device=device)
     return ids
 
-
-def pad_prompt(prompt, pad_len, pad_token="<unk>"):
-    to_pad = pad_len - len(prompt)
-    if to_pad == 0:
-        return prompt
-
-    pad_id = tokenizer.convert_tokens_to_ids(pad_token)
-    pad_ids = [pad_id] * to_pad
-    pads = torch.tensor(pad_ids, device=device)
-    return torch.cat((pads, prompt))
-
 def print_result(result, inp, n_steps):
     if local_rank != 0:
         return
@@ -187,15 +178,26 @@ def infer(ids, warmup):
     if local_rank == 0:
         print("==================")
 
-    result, n_steps, generated_token_time_out = speculative_generate(
-        model,
-        ids,
-        speculator,
-        new_tokens=100,
-        max_seq_len=model.config.max_expected_seq_len,
-        kv_cache_manager=kv_cache_manager,
-        decode_model=decode_model,
-    )
+    if speculator:
+        result, n_steps, generated_token_time_out = speculative_generate(
+            model,
+            ids,
+            speculator,
+            new_tokens=100,
+            max_seq_len=model.config.max_expected_seq_len,
+            kv_cache_manager=kv_cache_manager,
+            decode_model=decode_model,
+        )
+    else:
+        result, n_steps, generated_token_time_out = paged_generate(
+            model,
+            ids,
+            kv_cache_manager,
+            max_new_tokens=100,
+            max_seq_len=model.config.max_expected_seq_len,
+            do_sample=False,
+            decode_model=decode_model,
+        )
     if not warmup:
         total_tokens = 0
         for i in range(len(result)):
@@ -203,7 +205,6 @@ def infer(ids, warmup):
             total_tokens += (len(result[i]) - len(ids[i]))
         avg_tokens = total_tokens / len(result)
         print(f"time per token: {generated_token_time_out / avg_tokens}")
-
 
 if args.compile:
     print("compiling model")
@@ -213,7 +214,8 @@ if args.compile:
     decode_model = model
     decode_model = torch.compile(decode_model, mode=args.compile_mode, fullgraph=True)
     model = torch.compile(model, fullgraph=True, dynamic=True)
-    speculator = torch.compile(speculator, mode=args.compile_mode)
+    if speculator:
+        speculator = torch.compile(speculator, mode=args.compile_mode)
 
 template = "Below is an instruction that describes a task. Write a response that appropriately completes the request.\n\n### Instruction:\n{}\n\n### Response:"
 
@@ -231,8 +233,8 @@ prompt2 = ids_for_prompt(prompt2)
 prompt3 = ids_for_prompt(prompt3)
 prompt4 = ids_for_prompt(prompt4)
 
-ids = [prompt1, prompt2, prompt3, prompt4]
-# ids = [prompt1]
+# ids = [prompt1, prompt2, prompt3, prompt4]
+ids = [prompt1]
 
 infer(ids, warmup=True)
 print("generating output", local_rank)
