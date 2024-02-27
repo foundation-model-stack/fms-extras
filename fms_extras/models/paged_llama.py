@@ -200,12 +200,7 @@ class PagedMultiHeadAttention(MultiHeadAttention):
 
         out = self.dense(attn)
 
-        # if use_cache=True, we return the hidden_state as well as the kv cache
-        if use_cache:
-            # note: needed to add this check to return the data_layer as it fails compile otherwise
-            return out, cache_data_layer.data_layer
-        else:
-            return out
+        return out
 
 class TPPagedMultiHeadAttention(PagedMultiHeadAttention, TPModule):
 
@@ -303,15 +298,8 @@ class TPPagedMultiHeadAttention(PagedMultiHeadAttention, TPModule):
             is_self,
             is_causal_mask,
         )
-
-        # if use_cache=True, we return the hidden_state as well as the kv cache.
-        # We only reduce the output, and keep the cache thread-local
-        if use_cache:
-            out = reduce_from_tensor_model_parallel_region(out_par[0])
-            return out, out_par[1]
-        else:
-            out = reduce_from_tensor_model_parallel_region(out_par)
-            return out
+        out = reduce_from_tensor_model_parallel_region(out_par)
+        return out
 
 
 class PagedLLaMABlock(nn.Module):
@@ -393,9 +381,6 @@ class PagedLLaMABlock(nn.Module):
             is_self=True,
             is_causal_mask=is_causal_mask,
         )
-        cache = None
-        if use_cache:
-            x, cache = x
         if self.config.p_dropout != 0:
             x = self.dropout(x)
         # residual connection
@@ -410,42 +395,25 @@ class PagedLLaMABlock(nn.Module):
         # another residual
         x = x + residual
 
-        if use_cache:
-            return (x, cache)
-        else:
-            return x
+        return x
 
+class PagedLLaMAHeadless(nn.Module):
 
-class PagedLLaMA(nn.Module):
-    def __init__(
-        self,
-        config: Optional[PagedLLaMAConfig] = None,
-        distributed_strategy: DistributedStrategy = NoOpStrategy,
-        **kwargs,
-    ):
-        super(PagedLLaMA, self).__init__()
-        if config is not None:
-            self.config = config
-        else:
-            self.config = PagedLLaMAConfig()
-        self.config = self.config.updated(**kwargs)
+    def __init__(self, config: PagedLLaMAConfig, distributed_strategy: DistributedStrategy, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.config = config
         self.distributed_strategy = distributed_strategy
-
-        self.width = self.config.emb_dim
-        self.pad_id = self.config.pad_id
-        self.max_expected_seq_len = self.config.max_expected_seq_len
-
-        shared = WordEmbedding(
-            self.config.src_vocab_size,
-            self.config.emb_dim,
-            padding_idx=self.config.pad_id,
-            abs_pos=False,
-            reversible=True,
-            tie_weights=False,
-            bias=False,
+        self.shared = self.distributed_strategy.distribute_module(
+            WordEmbedding(
+                self.config.src_vocab_size,
+                self.config.emb_dim,
+                padding_idx=self.config.pad_id,
+                abs_pos=False,
+                reversible=True,
+                tie_weights=False,
+                bias=False,
+            )
         )
-        self.shared = self.distributed_strategy.distribute_module(shared)
-
         self.rot_emb = RotaryEmbedding(
             dim=self.config.emb_dim // self.config.nheads,
             ntk_scaling=self.config.ntk_scaling,
@@ -483,30 +451,14 @@ class PagedLLaMA(nn.Module):
         if self.config.p_dropout:
             self.dropout = nn.Dropout(self.config.p_dropout)
 
-        self.reset_params()
-
-    def get_config(self) -> PagedLLaMAConfig:
-        return self.config
-
-    @classmethod
-    def from_config(cls, config: PagedLLaMAConfig) -> "PagedLLaMA":
-        return cls(config)
-
-    def reset_params(self):
-        # Modules are self-initializing, we're just going to down-scale the final prediction head to be
-        # mixed-fan (inputs and gradients scale to the same inverse factors) if it isn't tied
-        self.shared.head.weight.data.normal_(
-            0, 1 / math.sqrt(math.sqrt(self.width * self.shared.vocab_size))
-        )
-
-    def _helper(
-        self,
-        x_in,
-        mask=None,
-        position_ids=None,
-        cache_data=None,
-        use_cache=False,
-        attn_algorithm=None,
+    def forward(
+            self,
+            x_in,
+            mask=None,
+            position_ids=None,
+            cache_data=None,
+            use_cache=False,
+            attn_algorithm=None,
     ):
 
         qlen = x_in.size(1)
@@ -529,11 +481,8 @@ class PagedLLaMA(nn.Module):
 
         x_in = self.shared(x_in)
 
-        # this is the output cache for all the decoder layers
-        present_key_value_states = []
-
         for i, layer in enumerate(self.layers):
-            output = layer(
+            x_in = layer(
                 x=x_in,
                 mask=mask,
                 position_ids=position_ids,
@@ -545,19 +494,48 @@ class PagedLLaMA(nn.Module):
                 attn_algorithm=attn_algorithm,
             )
 
-            if use_cache:
-                x_in, present_key_value_state = output
-                present_key_value_states.append(present_key_value_state)
-
-            else:
-                x_in = output
-
         dec_out = x_in
         dec_out = self.dec_norm(dec_out)
         if self.config.p_dropout:
             dec_out = self.dropout(dec_out)
 
-        return dec_out, present_key_value_states
+        return dec_out
+
+
+
+class PagedLLaMA(nn.Module):
+    def __init__(
+        self,
+        config: Optional[PagedLLaMAConfig] = None,
+        distributed_strategy: DistributedStrategy = NoOpStrategy,
+        **kwargs,
+    ):
+        super(PagedLLaMA, self).__init__()
+        if config is not None:
+            self.config = config
+        else:
+            self.config = PagedLLaMAConfig()
+        self.config = self.config.updated(**kwargs)
+        self.distributed_strategy = distributed_strategy
+
+        self.headless_model = PagedLLaMAHeadless(self.config, distributed_strategy)
+        # todo: head should be separated from shared for this, but keeping here for now as we would need to add tp
+        self.head = self.headless_model.shared
+        self.reset_params()
+
+    def get_config(self) -> PagedLLaMAConfig:
+        return self.config
+
+    @classmethod
+    def from_config(cls, config: PagedLLaMAConfig) -> "PagedLLaMA":
+        return cls(config)
+
+    def reset_params(self):
+        # Modules are self-initializing, we're just going to down-scale the final prediction head to be
+        # mixed-fan (inputs and gradients scale to the same inverse factors) if it isn't tied
+        self.head.head.weight.data.normal_(
+            0, 1 / math.sqrt(math.sqrt(self.config.emb_dim * self.head.vocab_size))
+        )
 
     def forward(
         self,
@@ -570,7 +548,7 @@ class PagedLLaMA(nn.Module):
         attn_algorithm=None,
         return_embeds=False,
     ):
-        output, cache = self._helper(
+        embeds = self.headless_model(
             x,
             mask,
             position_ids,
@@ -580,17 +558,13 @@ class PagedLLaMA(nn.Module):
         )
 
         if only_last_token:
-            output = output[:, -1, :]
-        preds = self.shared(output, reverse=True)
+            embeds = embeds[:, -1, :]
 
-        out = [preds]
-        if use_cache:
-            out.append(cache)
+        preds = self.head(embeds, reverse=True)
         if return_embeds:
-            out.append(output)
-        if len(out) == 1:
-            return out[0]
-        return out
+            return preds, embeds
+        else:
+            return preds
 
 
 # Register common LLaMA variants with the model registration API
@@ -633,10 +607,10 @@ models.register_model(_architecture_name, "70b", _llama_factory_factory(_70b_con
 
 def _rename_weights_to_fms(orig_sd):
     replacements = [
-        (r"^tok_embeddings", "shared.emb"),
-        (r"^norm", "dec_norm"),
-        (r"^output", "shared.head"),
-        (r"^layers", "layers"),
+        (r"^tok_embeddings", "headless_model.shared.emb"),
+        (r"^norm", "headless_model.dec_norm"),
+        (r"^output", "headless_model.shared.head"),
+        (r"^layers", "headless_model.layers"),
         (r"\.attention\.", ".attn."),
         (r"attn\.wq", "attn.query"),
         (r"attn\.wk", "attn.key"),
@@ -660,10 +634,10 @@ def _rename_weights_to_fms(orig_sd):
 
 def _hf_sd_to_fms_sd(hf_sd: Mapping) -> Mapping:
     replacements = [
-        (r"^lm_head.weight", "shared.head.weight"),
-        (r"^model.embed_tokens.weight", "shared.emb.weight"),
-        (r"^model.norm", "dec_norm"),
-        (r"^model.layers", "layers"),
+        (r"^lm_head.weight", "headless_model.shared.head.weight"),
+        (r"^model.embed_tokens.weight", "headless_model.shared.emb.weight"),
+        (r"^model.norm", "headless_model.dec_norm"),
+        (r"^model.layers", "headless_model.layers"),
         (r"self_attn\.k_proj", "attn.key"),
         (r"self_attn\.v_proj", "attn.value"),
         (r"self_attn\.q_proj", "attn.query"),
@@ -676,7 +650,7 @@ def _hf_sd_to_fms_sd(hf_sd: Mapping) -> Mapping:
     ]
     new_sd = {}
 
-    trans_required_pattern = re.compile("layers.[0-9]+.attn.(query|key).weight")
+    trans_required_pattern = re.compile("headless_model.layers.[0-9]+.attn.(query|key).weight")
     for name, param in hf_sd.items():
         new_name = name
         for pattern, repl in replacements:

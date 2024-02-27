@@ -127,7 +127,7 @@ torch.set_grad_enabled(False)
 speculator = None
 if args.speculator_path is not None:
     print("loading speculator")
-    speculator = MLPSpeculator(model.width, 4096, model.config.src_vocab_size, n_predict=3)
+    speculator = MLPSpeculator(model.config.emb_dim, 4096, model.config.src_vocab_size, n_predict=3)
     speculator.load_state_dict(
         torch.load(args.speculator_path, map_location=device)["model_state"]
     )

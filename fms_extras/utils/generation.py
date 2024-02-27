@@ -98,7 +98,7 @@ def speculative_generate(
         return_embeds=True,
         **kwargs
     )
-    _, past_key_value_states, embeds = output
+    _, embeds = output
     embeds = embeds[:, -1:]
 
     n_gen = torch.zeros(bsize, device=inputs.device, dtype=torch.int)
@@ -174,10 +174,9 @@ def speculative_generate(
             input_ids = flat_inputs
 
         # Base model forward pass
-        output = decode_model(
+        logits, embeds = decode_model(
             input_ids, position_ids=position_ids, cache_data=cache_data, return_embeds=True, **kwargs
-        ) # 1 b' v
-        logits, _, embeds = output # 1 n' v, 1 n' d
+        ) # 1 n' v, 1 n' d
         next_vals = torch.argmax(logits, dim=-1)  # 1 n'
 
         if this_flatting:
@@ -289,22 +288,6 @@ def paged_generate(
     kwargs["use_cache"] = True
     sequence_ids: Optional[List[int]] = None
 
-    # comment out if you do not want to profile
-    # with torch.profiler.profile(
-    #         activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-    #         schedule=torch.profiler.schedule(
-    #             skip_first=5,
-    #             wait=0,
-    #             warmup=3,
-    #             active=1,
-    #             repeat=1,
-    #         ),
-    #         on_trace_ready=functools.partial(trace_handler, output_path="/net/storage149/mnt/md0/jmrosenk/trace_generate_fms_paged_attn", extra_name="0"),
-    #         with_stack=True,
-    #         profile_memory=True,
-    #         record_shapes=True,
-    # ) as prof:
-    # total_time = 0
     for i in range(max_new_tokens):
         input_ids = next_input[:, -max_seq_len:]
 
@@ -338,9 +321,9 @@ def paged_generate(
         )
 
         if i == 0:
-            logits, _ = model(input_ids, **kwargs)
+            logits = model(input_ids, **kwargs)
         else:
-            logits, _ = decode_model(input_ids, **kwargs)
+            logits = decode_model(input_ids, **kwargs)
         logits = logits[:, -1, :]
 
         if do_sample:
@@ -358,9 +341,6 @@ def paged_generate(
         result = torch.cat((result, next_val), dim=-1)
 
         next_input = next_val
-
-            # comment out if you do not want to profile
-            # prof.step()
 
     kv_cache_manager.free_sequences(sequence_ids)  # type: ignore
     end_time = time.time()
