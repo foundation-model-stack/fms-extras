@@ -306,6 +306,8 @@ class PagedAttentionCacheDataLayer(AttentionComputationMixin, CacheDataLayer):
     def store(
         self, keys: torch.Tensor, values: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # in the case where the indices have been flattened for performance purposes, we must unflatten them to the
+        # format expected in the reshape_and_cache function
         if self.unflatten_indices is not None:
             # inp: n' h d
             # inds: b k n
@@ -342,7 +344,6 @@ class PagedAttentionCacheDataLayer(AttentionComputationMixin, CacheDataLayer):
         # Pre-allocate the output tensor.
         attn = torch.empty_like(query)
 
-        # TODO: Check with v2
         num_seqs, num_heads, head_size = query.shape
         _PARTITION_SIZE = 512
         max_num_partitions = (
@@ -461,14 +462,41 @@ def get_max_gpu_blocks_available(
     gpu_memory_utilization: float,
     dtype,
 ) -> int:
+    """
+    gets the max number of gpu blocks available within some gpu memory utilization.
+
+    Note:This will capture whatever is currently being used in GPU to determine the number of blocks to be allocated
+
+    Args:
+        block_size: int
+            the number of tokens in each block
+        emb_dim: int
+            the embedding dimension of the model
+        nheads: int
+            the number of heads in the model
+        nlayers: int
+            the number of layers in the model
+        gpu_memory_utilization: float
+            the max gpu memory utilization target
+        dtype: dtype
+            value type to store in cache
+
+    Returns:
+    int
+        the number of gpu blocks that can be allocated to stay under the given gpu utilization
+    """
     # Calculate the number of blocks that can be allocated with the
     # profiled peak memory.
     torch.cuda.synchronize()
     peak_memory = torch.cuda.max_memory_allocated()
     total_gpu_memory = torch.cuda.get_device_properties("cuda").total_memory
+
+    # get the total size of a cache block
     cache_block_size = get_cache_block_size(
         block_size, emb_dim // nheads, nheads, nlayers, dtype
     )
+
+    # determine the number of gpu blocks that can be allocated with the remaining memory
     num_gpu_blocks = int(
         (total_gpu_memory * gpu_memory_utilization - peak_memory) // cache_block_size
     )
@@ -478,6 +506,15 @@ def get_max_gpu_blocks_available(
 
 
 class CacheBlock:
+    """
+    CacheBlock is a logical construct to denote a single block in GPU memory. CacheBlock contains a block_number,
+    block_size, and num_tokens.
+
+    block_number is used to determine its physical address in GPU memory
+    block_size is the maximum number of slots allowed to be stored in the block (each slot holds a single token)
+    num_tokens is the current number of tokens that reside in the CacheBlock
+    """
+
     def __init__(
         self,
         block_number: int,
@@ -488,15 +525,37 @@ class CacheBlock:
         self.num_tokens = 0
 
     def num_available_slots(self) -> int:
+        """Get the total remaining number of slots available in this CacheBlock
+
+        Returns:
+        int
+            the number of unused slots
+        """
         return self.block_size - self.num_tokens
 
     def is_full(self) -> bool:
+        """Denotes whether all slots are occupied
+
+        Returns:
+        bool
+            True if all slots are occupied, otherwise False
+        """
         return self.num_available_slots() == 0
 
     def append_num_tokens(self, num_tokens: int):
+        """Logically adds num_tokens tokens to the CacheBlock
+        Args:
+            num_tokens: int
+                number of tokens to add
+        """
         self.num_tokens += num_tokens
 
     def subtract_num_tokens(self, num_tokens: int):
+        """Logically subtracts num_tokens tokens from the CacheBlock
+        Args:
+            num_tokens: int
+                number of tokens to add
+        """
         self.num_tokens -= num_tokens
 
     def __repr__(self):
@@ -504,6 +563,17 @@ class CacheBlock:
 
 
 class CacheBlockGroup(List[CacheBlock]):
+    """
+    CacheBlockGroup is a logical construct to denote a List of CacheBlocks. A CacheBlockGroup consists of a sequence_id,
+    block_size, prefix, and ref_count
+
+    sequence_id is used to denote which sequence this CacheBlockGroup belongs to
+    block_size is the maximum number of slots allowed to be stored in a single CacheBlock (each slot holds a single
+    token)
+    prefix is used when the given CacheBlockGroup is referencing another CacheBlockGroup (not new memory)
+    ref_count is the count of CacheBlockGroups referencing the current CacheBlockGroup and is used in garbage collection
+    """
+
     def __init__(self, sequence_id: int, block_size: int):
         super().__init__()
         self.sequence_id = sequence_id
@@ -515,6 +585,18 @@ class CacheBlockGroup(List[CacheBlock]):
 
     @classmethod
     def from_prefix(cls, sequence_id: int, prefix: "CacheBlockGroup"):
+        """Create a CacheBlockGroup from another CacheBlockGroup (reference) as its prefix
+
+        Args:
+            sequence_id: int
+                the sequence id for this new CacheBlockGroup
+            prefix: CacheBlockGroup
+                the prefix for this CacheBlockGroup
+
+        Returns:
+        CacheBlockGroup
+            a new CacheBlockGroup who's prefixed by the given prefix
+        """
         cbg = cls(sequence_id, prefix.block_size)
         cbg._is_generating = True
         cbg._is_initialized_with_prompt = True
@@ -531,6 +613,16 @@ class CacheBlockGroup(List[CacheBlock]):
         return cbg
 
     def remove_tokens(self, num_tokens: int) -> List[CacheBlock]:
+        """Logically remove tokens from a CacheBlockGroup
+
+        Args:
+            num_tokens: int
+                number of tokens to remove
+
+        Returns:
+        List[CacheBlock]
+            the list of cache blocks that are to be freed
+        """
         # remove tokens and return the blocks to be freed
         prefix_sequence_length = (
             0 if self.prefix is None else self.prefix.get_sequence_length()
@@ -543,10 +635,13 @@ class CacheBlockGroup(List[CacheBlock]):
         num_tokens_to_remove = num_tokens
         blocks_to_free = []
         for cb in reversed(self):
+            # if we have more tokens to remove than exist in the cache block, we can simply remove that cache block
             if cb.num_tokens < num_tokens_to_remove:
                 num_tokens_to_remove -= cb.num_tokens
                 cb.num_tokens = 0
                 blocks_to_free.append(cb)
+            # if we have more tokens in the cache block than we are trying to remove, we just remove them from the
+            # current cache block
             else:
                 # if its equal to num tokens, we don't need to free the block as it can just be re-used
                 cb.subtract_num_tokens(num_tokens_to_remove)
@@ -556,25 +651,69 @@ class CacheBlockGroup(List[CacheBlock]):
             self.pop()
         return blocks_to_free
 
-    def is_initialized_with_prompt(self):
+    def is_initialized_with_prompt(self) -> bool:
+        """Denotes whether this CacheBlockGroup has already been initialized with the prompt
+
+        Returns:
+        bool
+            returns True if the CacheBlockGroup has already gone through a single forward pass where the keys and values
+            have been store, otherwise returns False
+        """
         return self._is_initialized_with_prompt
 
-    def is_generating(self):
+    def is_generating(self) -> bool:
+        """Denotes whether this CacheBlockGroup is currently being used in generation (decode)
+
+        Returns:
+        bool
+            Returns True if this CacheBlockGroup is in decode phase, otherwise False
+        """
         return self._is_generating
 
-    def last_cache_block_is_full(self):
+    def last_cache_block_is_full(self) -> bool:
+        """Denotes whether the last cache block in this group is full
+
+        Returns:
+        bool
+            Returns True if the last cache block is full, otherwise False
+        """
         return self[-1].is_full()
 
-    def get_sequence_length(self):
+    def get_sequence_length(self) -> int:
+        """Gets the sequence length of this CacheBlockGroup
+
+        Returns:
+        int
+            the sequence length of this CacheBlockGroup
+        """
         if len(self) == 0:
             return 0
         else:
             return sum([cb.num_tokens for cb in self])
 
-    def get_cache_block(self, position: int):
+    def get_cache_block(self, position: int) -> CacheBlock:
+        """Get a single CacheBlock in this CacheBlockGroup
+
+        Args:
+            position: int
+                the token position
+
+        Returns:
+        CacheBlock
+            a single CacheBlock which contains a token at the given position
+        """
         return self[position // self.block_size]
 
     def get_slot_mapping(self, position: Optional[int] = None) -> List[int]:
+        """Get the slot mapping from the given position til the end of the sequence
+
+        Args:
+            position: int, optional
+                the start token position. If None, will be 0 (default is None)
+        Returns:
+        List[int]
+            a list containing the slot position for each token from position to sequence length
+        """
         slot_mapping = []
         start = position if position else 0
         for position_i in range(start, self.get_sequence_length()):
@@ -584,11 +723,28 @@ class CacheBlockGroup(List[CacheBlock]):
             slot_mapping.append(slot)
         return slot_mapping
 
-    def get_block_mapping(self):
+    def get_block_mapping(self) -> List[int]:
+        """gets a list of the block numbers of all CacheBlocks in this CacheBlockGroup
+        Returns:
+        List[int]
+            a list of the block numbers of all CacheBlocks in this CacheBlockGroup
+        """
         return [cb.block_number for cb in self]
 
 
 class PagedKVCacheManager(KVCacheManager):
+    """
+    PagedKVCacheManager is a specific form of KVCacheManager that is used for management of the kv-cache when using the
+    Paged Attention kernels.
+
+    This class is responsible for:
+
+    - allocation of new sequences in the kv-cache
+    - allocation/de-allocation of tokens for each sequence
+    - garbage collection of all sequences in the kv-cache
+    - contains the physical cache (a list of key and value tensors)
+    """
+
     def __init__(
         self,
         num_layers: int,
