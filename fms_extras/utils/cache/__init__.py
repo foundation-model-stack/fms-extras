@@ -245,42 +245,6 @@ class KVCacheManager(metaclass=abc.ABCMeta):
 KVCache = Tuple[torch.Tensor, torch.Tensor]  # (key cache, value cache)
 
 
-@dataclasses.dataclass
-class OutOfPlaceCacheDataLayer(CacheDataLayer):
-    data_layer: Tuple[torch.Tensor, torch.Tensor]
-
-    def get_cache_type(self) -> str:
-        return "out-of-place"
-
-    def store(
-        self, keys: torch.Tensor, values: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        if self.data_layer is not None:
-            self.data_layer = (
-                torch.cat((self.data_layer[0], keys), dim=2),
-                torch.cat((self.data_layer[1], values), dim=2),
-            )
-            keys, values = self.data_layer
-        return keys, values
-
-    def is_filled(self) -> bool:
-        return self.data_layer is not None
-
-
-class OutOfPlaceCacheData(CacheData):
-    def __init__(self, data: List[Tuple[torch.Tensor, torch.Tensor]]):
-        self.data = data
-        self.max_sequence_length = (
-            0 if self.data[0] is None else self.data[0][0].size(2)
-        )
-
-    def get_layer(self, layer_index: int) -> OutOfPlaceCacheDataLayer:
-        return OutOfPlaceCacheDataLayer(data_layer=self.data[layer_index])
-
-    def is_filled(self) -> bool:
-        return self.data[0] is not None
-
-
 def flatten_batch(inp):
     # Takes a bsize x n_candidates x candidate_len rectangular batch of input indices
     # Returns 1) a flattened set of indices with all redundant tokens removed,

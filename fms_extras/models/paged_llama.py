@@ -61,7 +61,7 @@ class PagedLLaMAConfig(ModelConfig):
     ntk_scaling: bool = False
 
 
-class PagedMultiHeadAttention(MultiHeadAttention):
+class PagedMultiHeadAttention(nn.Module):
     """
     Performs multi-headed self- or cross-attention, with optional attention masking.
 
@@ -80,17 +80,55 @@ class PagedMultiHeadAttention(MultiHeadAttention):
         position_encoder: Optional[PositionEncoder] = None,
         gain=1,
     ):
-        super().__init__(
-            emb_dim,
-            emb_kq,
-            emb_v,
-            nheads,
-            kvheads,
-            p_dropout,
-            use_bias,
-            position_encoder,
-            gain,
+        super(PagedMultiHeadAttention, self).__init__()
+        self.nheads = nheads
+        self.kvheads = kvheads
+        self.emb_dim = emb_dim
+        self.emb_kq_per_head = emb_kq
+        self.emb_v_per_head = emb_v
+        self.p_dropout = p_dropout if p_dropout is not None else 0.0
+        self.use_bias = use_bias
+        self.query = nn.Linear(
+            self.emb_dim, self.nheads * self.emb_kq_per_head, bias=use_bias
         )
+        self.key = nn.Linear(
+            self.emb_dim, self.kvheads * self.emb_kq_per_head, bias=use_bias
+        )
+        self.value = nn.Linear(
+            self.emb_dim, self.kvheads * self.emb_v_per_head, bias=use_bias
+        )
+        self.dense = nn.Linear(
+            self.nheads * self.emb_v_per_head, self.emb_dim, bias=use_bias
+        )
+        if self.p_dropout:
+            self.attn_dropout = nn.Dropout(self.p_dropout)
+        self.position_encoder = position_encoder
+        # Avoiding graph breaks
+        self.previous_flash: bool = torch.backends.cuda.flash_sdp_enabled()
+        self.previous_mem_efficient: bool = (
+            torch.backends.cuda.mem_efficient_sdp_enabled()
+        )
+        self.previous_math: bool = torch.backends.cuda.math_sdp_enabled()
+        self.reset_params(gain)
+
+    def reset_params(self, gain=1):
+        # Ensure softmax inputs are standard normal
+        for layer in ["query", "key"]:
+            nn.init.trunc_normal_(
+                getattr(self, layer).weight, mean=0.0, std=self.emb_dim**-0.5
+            )
+        # Ensure projection layers have same scale (for normalized-step dataloaders like
+        # AdamW / Sophia), and maintain input norm up to attention remix, in expectation
+        for layer in ["value", "dense"]:
+            nn.init.trunc_normal_(
+                getattr(self, layer).weight,
+                mean=0.0,
+                std=(gain / (self.emb_dim * self.nheads * self.emb_v_per_head) ** 0.5)
+                ** 0.5,
+            )  # Using explicit terms instead of numel to account for eventual MQA addition
+        if self.use_bias:
+            for layer in ["query", "key", "value", "dense"]:
+                getattr(self, layer).bias.data.zero_()
 
     def to_tp(self, group: ProcessGroup) -> "TPPagedMultiHeadAttention":
         return TPPagedMultiHeadAttention.import_module(self, group)
@@ -111,7 +149,7 @@ class PagedMultiHeadAttention(MultiHeadAttention):
         """
         cache_data_layer: PagedAttentionCacheDataLayer, optional
             A single layer of the cache (default is None)
-        position_ids: Optional[torch.LongTensor]
+        position_ids: Optional[torch.Tensor]
             The position of each of the tokens encoded in q and k. Used for RoPE embeddings
         use_cache: bool
             if True, the kv states for self/cross attention will be saved, otherwise they will not be saved
@@ -144,7 +182,7 @@ class PagedMultiHeadAttention(MultiHeadAttention):
             queries, keys = self.position_encoder.adjusted_qk(
                 queries,
                 keys,
-                position_ids,
+                position_ids,  # type: ignore
                 None,
                 use_cache,
             )
@@ -170,7 +208,7 @@ class PagedMultiHeadAttention(MultiHeadAttention):
 
             if self.position_encoder is not None:
                 attn_mask = self.position_encoder.adjusted_mask(
-                    mask, queries, keys, position_ids, use_cache
+                    mask, queries, keys, position_ids, use_cache  # type: ignore
                 )
             else:
                 attn_mask = mask
