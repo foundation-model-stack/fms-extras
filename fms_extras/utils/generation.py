@@ -98,7 +98,7 @@ def speculative_generate(
         return_embeds=True,
         **kwargs
     )
-    _, embeds = output
+    _, past_key_value_states, embeds = output
     embeds = embeds[:, -1:]
 
     n_gen = torch.zeros(bsize, device=inputs.device, dtype=torch.int)
@@ -174,9 +174,10 @@ def speculative_generate(
             input_ids = flat_inputs
 
         # Base model forward pass
-        logits, embeds = decode_model(
+        output = decode_model(
             input_ids, position_ids=position_ids, cache_data=cache_data, return_embeds=True, **kwargs
-        ) # 1 n' v, 1 n' d
+        ) # 1 b' v
+        logits, _, embeds = output # 1 n' v, 1 n' d
         next_vals = torch.argmax(logits, dim=-1)  # 1 n'
 
         if this_flatting:
@@ -321,9 +322,9 @@ def paged_generate(
         )
 
         if i == 0:
-            logits = model(input_ids, **kwargs)
+            logits, _ = model(input_ids, **kwargs)
         else:
-            logits = decode_model(input_ids, **kwargs)
+            logits, _ = decode_model(input_ids, **kwargs)
         logits = logits[:, -1, :]
 
         if do_sample:

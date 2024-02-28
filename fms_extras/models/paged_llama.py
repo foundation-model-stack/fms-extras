@@ -121,14 +121,14 @@ class PagedMultiHeadAttention(MultiHeadAttention):
                 keys,
                 position_ids,
                 None,
-                True,
+                use_cache,
             )
 
         # store the values in kv-cache
         if use_cache and cache_data_layer:
             keys, values = cache_data_layer.store(keys, values)
 
-        if cache_data_layer.is_filled():
+        if cache_data_layer and cache_data_layer.is_filled():
             attn = cache_data_layer.attend(queries, keys, values)
         # otherwise we always fall back into SDPA as this is either a prompt or it is a single contiguous cache
         else:
@@ -200,7 +200,12 @@ class PagedMultiHeadAttention(MultiHeadAttention):
 
         out = self.dense(attn)
 
-        return out
+        # if use_cache=True, we return the hidden_state as well as the kv cache
+        if use_cache:
+            # note: needed to add this check to return the data_layer as it fails compile otherwise
+            return out, cache_data_layer.data_layer
+        else:
+            return out
 
 class TPPagedMultiHeadAttention(PagedMultiHeadAttention, TPModule):
 
@@ -298,8 +303,15 @@ class TPPagedMultiHeadAttention(PagedMultiHeadAttention, TPModule):
             is_self,
             is_causal_mask,
         )
-        out = reduce_from_tensor_model_parallel_region(out_par)
-        return out
+
+        # if use_cache=True, we return the hidden_state as well as the kv cache.
+        # We only reduce the output, and keep the cache thread-local
+        if use_cache:
+            out = reduce_from_tensor_model_parallel_region(out_par[0])
+            return out, out_par[1]
+        else:
+            out = reduce_from_tensor_model_parallel_region(out_par)
+            return out
 
 
 class PagedLLaMABlock(nn.Module):
@@ -381,6 +393,9 @@ class PagedLLaMABlock(nn.Module):
             is_self=True,
             is_causal_mask=is_causal_mask,
         )
+        cache = None
+        if use_cache:
+            x, cache = x
         if self.config.p_dropout != 0:
             x = self.dropout(x)
         # residual connection
@@ -395,25 +410,32 @@ class PagedLLaMABlock(nn.Module):
         # another residual
         x = x + residual
 
-        return x
+        if use_cache:
+            return (x, cache)
+        else:
+            return x
 
 class PagedLLaMAHeadless(nn.Module):
 
-    def __init__(self, config: PagedLLaMAConfig, distributed_strategy: DistributedStrategy, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(
+        self,
+        config: PagedLLaMAConfig,
+        distributed_strategy: DistributedStrategy
+    ):
+        super(PagedLLaMAHeadless, self).__init__()
         self.config = config
         self.distributed_strategy = distributed_strategy
-        self.shared = self.distributed_strategy.distribute_module(
-            WordEmbedding(
-                self.config.src_vocab_size,
-                self.config.emb_dim,
-                padding_idx=self.config.pad_id,
-                abs_pos=False,
-                reversible=True,
-                tie_weights=False,
-                bias=False,
-            )
+        shared = WordEmbedding(
+            self.config.src_vocab_size,
+            self.config.emb_dim,
+            padding_idx=self.config.pad_id,
+            abs_pos=False,
+            reversible=True,
+            tie_weights=False,
+            bias=False,
         )
+        self.shared = self.distributed_strategy.distribute_module(shared)
+
         self.rot_emb = RotaryEmbedding(
             dim=self.config.emb_dim // self.config.nheads,
             ntk_scaling=self.config.ntk_scaling,
@@ -481,8 +503,11 @@ class PagedLLaMAHeadless(nn.Module):
 
         x_in = self.shared(x_in)
 
+        # this is the output cache for all the decoder layers
+        present_key_value_states = []
+
         for i, layer in enumerate(self.layers):
-            x_in = layer(
+            output = layer(
                 x=x_in,
                 mask=mask,
                 position_ids=position_ids,
@@ -494,12 +519,19 @@ class PagedLLaMAHeadless(nn.Module):
                 attn_algorithm=attn_algorithm,
             )
 
+            if use_cache:
+                x_in, present_key_value_state = output
+                present_key_value_states.append(present_key_value_state)
+
+            else:
+                x_in = output
+
         dec_out = x_in
         dec_out = self.dec_norm(dec_out)
         if self.config.p_dropout:
             dec_out = self.dropout(dec_out)
 
-        return dec_out
+        return dec_out, present_key_value_states
 
 
 
@@ -548,7 +580,7 @@ class PagedLLaMA(nn.Module):
         attn_algorithm=None,
         return_embeds=False,
     ):
-        embeds = self.headless_model(
+        embeds, cache = self.headless_model(
             x,
             mask,
             position_ids,
@@ -561,10 +593,15 @@ class PagedLLaMA(nn.Module):
             embeds = embeds[:, -1, :]
 
         preds = self.head(embeds, reverse=True)
+
+        out = [preds]
+        if use_cache:
+            out.append(cache)
         if return_embeds:
-            return preds, embeds
-        else:
-            return preds
+            out.append(embeds)
+        if len(out) == 1:
+            return out[0]
+        return out
 
 
 # Register common LLaMA variants with the model registration API
@@ -609,7 +646,7 @@ def _rename_weights_to_fms(orig_sd):
     replacements = [
         (r"^tok_embeddings", "headless_model.shared.emb"),
         (r"^norm", "headless_model.dec_norm"),
-        (r"^output", "headless_model.shared.head"),
+        (r"^output", "head.head"),
         (r"^layers", "headless_model.layers"),
         (r"\.attention\.", ".attn."),
         (r"attn\.wq", "attn.query"),
@@ -634,7 +671,7 @@ def _rename_weights_to_fms(orig_sd):
 
 def _hf_sd_to_fms_sd(hf_sd: Mapping) -> Mapping:
     replacements = [
-        (r"^lm_head.weight", "headless_model.shared.head.weight"),
+        (r"^lm_head.weight", "head.head.weight"),
         (r"^model.embed_tokens.weight", "headless_model.shared.emb.weight"),
         (r"^model.norm", "headless_model.dec_norm"),
         (r"^model.layers", "headless_model.layers"),

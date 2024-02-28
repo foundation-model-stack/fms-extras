@@ -29,16 +29,11 @@ lib.define(
 # needed for compile
 @torch.library.impl(lib, "reshape_and_cache", "Meta")
 def _reshape_and_cache_meta(key, value, key_cache, value_cache, slot_mapping):
-    return key_cache.contiguous(), value_cache.contiguous()
+    return key_cache, value_cache
 
 
 @torch.library.impl(lib, "reshape_and_cache", "CUDA")
 def _reshape_and_cache(key, value, key_cache, value_cache, slot_mapping):
-    key = key.contiguous()
-    value = value.contiguous()
-    key_cache = key_cache.contiguous()
-    value_cache = value_cache.contiguous()
-    slot_mapping = slot_mapping.contiguous()
     cache_ops.reshape_and_cache(key, value, key_cache, value_cache, slot_mapping)
     return key_cache, value_cache
 
@@ -84,7 +79,7 @@ def _paged_attention_v2_meta(
     max_context_len,
     alibi_slopes=None,
 ):
-    return out.contiguous()
+    return out
 
 
 @torch.library.impl(lib, "paged_attention_v2", "CUDA")
@@ -104,16 +99,6 @@ def _paged_attention_v2(
     max_context_len,
     alibi_slopes=None,
 ):
-    out = out.contiguous()
-    exp_sums = exp_sums.contiguous()
-    max_logits = max_logits.contiguous()
-    tmp_out = tmp_out.contiguous()
-    query = query.contiguous()
-    key_cache = key_cache.contiguous()
-    value_cache = value_cache.contiguous()
-    block_tables = block_tables.contiguous()
-    context_lens = context_lens.contiguous()
-
     attn_ops.paged_attention_v2(
         out,
         exp_sums,
@@ -195,7 +180,7 @@ def _paged_attention_v1_meta(
     max_context_len,
     alibi_slopes=None,
 ):
-    return out.contiguous()
+    return out
 
 
 @torch.library.impl(lib, "paged_attention_v1", "CUDA")
@@ -212,13 +197,6 @@ def _paged_attention_v1(
     max_context_len,
     alibi_slopes=None,
 ):
-    out = out.contiguous()
-    query = query.contiguous()
-    key_cache = key_cache.contiguous()
-    value_cache = value_cache.contiguous()
-    block_tables = block_tables.contiguous()
-    context_lens = context_lens.contiguous()
-
     attn_ops.paged_attention_v1(
         out,
         query,
