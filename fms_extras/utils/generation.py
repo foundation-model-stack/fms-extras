@@ -1,26 +1,25 @@
 import time
-from typing import Union, Callable, List, MutableMapping, Any, Optional
+from typing import Any, Callable, List, MutableMapping, Optional, Union
 
 import torch
 import torch.nn.functional as F
-from torch import distributed as dist
+
 from fms_extras.models.speculator import MLPSpeculator
-from fms_extras.utils.cache import select_inflate_dim, flatten_batch, KVCacheManager
-from fms_extras.utils.cache.expandable import ExpandableKVCacheManager
-from fms_extras.utils.cache.paged import PagedKVCacheManager
+from fms_extras.utils.cache import flatten_batch, select_inflate_dim
+from fms_extras.utils.cache.paged import PagedAttentionCacheData, PagedKVCacheManager
 
 
 def speculative_generate(
     model: Union[Callable, torch.nn.Module],
     input_ids: Union[torch.Tensor, List[torch.Tensor]],
     speculator: MLPSpeculator,
+    kv_cache_manager: PagedKVCacheManager,
     max_seq_len: int = 2048,
     new_tokens: int = 256,
     top_k: int = 5,
     threshes=[5, 3, 2],
-    kv_cache_manager: PagedKVCacheManager = None,
-    flatting = True,
-    decode_model: Optional[Union[Callable, torch.nn.Module]] = None
+    flatting=True,
+    decode_model: Optional[Union[Callable, torch.nn.Module]] = None,
 ):
     """
     A reference implementation of speculative decoding generation.
@@ -35,6 +34,8 @@ def speculative_generate(
         input_ids: A length n tensor of token IDs, or list of such tensors
         speculator: A function or nn.Module that takes a state vector and sampled token
             and returns a set of candidate suffixes
+        kv_cache_manager: PagedKVCacheManager
+            the paged kv-cache manager to be used in generation
         max_seq_len: the sequence length of the base model
         new_tokens: number of tokens to generate
         top_k: only score the top k candidates from the speculator
@@ -57,10 +58,10 @@ def speculative_generate(
     inputs = torch.stack(
         [F.pad(input_ids[i], (n_pads_init[i], 0)) for i in range(bsize)]
     )
-    num_tokens_per_sequence = torch.count_nonzero(
-        inputs[:, :-1].T, dim=0
-    ).tolist()
-    cache_data = kv_cache_manager.allocate_tokens(num_tokens_per_sequence)
+    num_tokens_per_sequence = torch.count_nonzero(inputs[:, :-1].T, dim=0).tolist()
+    cache_data: PagedAttentionCacheData = kv_cache_manager.allocate_tokens(
+        num_tokens_per_sequence
+    )
     parent_sequence_ids = cache_data.sequence_ids
     # Build padded causal mask
     mask = torch.ones(
@@ -114,12 +115,16 @@ def speculative_generate(
         num_tokens_per_sequence = [n_adds for _ in range(input_ids.size(0) * top_k)]
         # each parent will have top_k child sequences
         for parent_sequence_id in parent_sequence_ids:
-            child_sequence_ids = kv_cache_manager.add_child_sequences(parent_sequence_id, top_k)
+            child_sequence_ids = kv_cache_manager.add_child_sequences(
+                parent_sequence_id, top_k
+            )
             child_sequence_ids_list.append(child_sequence_ids)
             child_sequence_ids_flattened.extend(child_sequence_ids)
 
         # add n_adds tokens to each candidate
-        cache_data = kv_cache_manager.allocate_tokens(num_tokens_per_sequence, child_sequence_ids_flattened)
+        cache_data = kv_cache_manager.allocate_tokens(
+            num_tokens_per_sequence, child_sequence_ids_flattened
+        )
         position_ids = cache_data.compute_position_ids(num_tokens_per_sequence)
 
         # Get candidate set of speculations
@@ -130,14 +135,18 @@ def speculative_generate(
 
         this_flatting = False
         if flatting:
-            flat_inputs, unflat_indices, flat_indices = flatten_batch(input_ids) # b', b k 1+h, b'
+            flat_inputs, unflat_indices, flat_indices = flatten_batch(
+                input_ids
+            )  # b', b k 1+h, b'
             compression = flat_inputs.numel() / input_ids.numel()
-            if compression < .75:
+            if compression < 0.75:
                 this_flatting = True
-                flat_inputs = flat_inputs[None,] # 1 b'
+                flat_inputs = flat_inputs[None,]  # 1 b'
                 cache_data.unflatten_indices = unflat_indices
                 cache_data.flatten_indices = flat_indices
-                position_ids = select_inflate_dim(position_ids.view(-1), flat_indices)[None,]
+                position_ids = select_inflate_dim(position_ids.view(-1), flat_indices)[
+                    None,
+                ]
         input_ids = input_ids.view(-1, n_adds)  # bk 1+h
 
         context_lengths = cache_data.context_lengths  # bk
@@ -146,7 +155,8 @@ def speculative_generate(
             if cache_data.unflatten_indices is None
             else cache_data.unflatten_indices.size(-1)
         )
-        context_lengths = context_lengths.unsqueeze(1).expand(
+        # no reason to check type here as generation allocation always returns context_lengths
+        context_lengths = context_lengths.unsqueeze(1).expand(  # type: ignore
             -1, inflate_factor
         )  # bk n
         context_lengths = (
@@ -175,15 +185,19 @@ def speculative_generate(
 
         # Base model forward pass
         output = decode_model(
-            input_ids, position_ids=position_ids, cache_data=cache_data, return_embeds=True, **kwargs
-        ) # 1 b' v
-        logits, _, embeds = output # 1 n' v, 1 n' d
+            input_ids,
+            position_ids=position_ids,
+            cache_data=cache_data,
+            return_embeds=True,
+            **kwargs
+        )  # 1 b' v
+        logits, _, embeds = output  # 1 n' v, 1 n' d
         next_vals = torch.argmax(logits, dim=-1)  # 1 n'
 
         if this_flatting:
             unflat_indices = unflat_indices.view(-1, unflat_indices.size(2))
-            next_vals = select_inflate_dim(next_vals[0], unflat_indices) # bk 1+h
-            embeds = select_inflate_dim(embeds[0], unflat_indices) # bk 1+h d
+            next_vals = select_inflate_dim(next_vals[0], unflat_indices)  # bk 1+h
+            embeds = select_inflate_dim(embeds[0], unflat_indices)  # bk 1+h d
             # TODO: make more efficient by best guessing out of unflat indices rather than from here directly
         else:
             next_vals = next_vals.view(-1, n_adds)
@@ -200,25 +214,35 @@ def speculative_generate(
         )  # b 1 1+h
 
         # Set global values to those of best guess
-        next_vals = next_vals.view(bsize, top_k, n_adds).gather(1, best_guess_unflat).squeeze(1)  # b 1+h
+        next_vals = (
+            next_vals.view(bsize, top_k, n_adds).gather(1, best_guess_unflat).squeeze(1)
+        )  # b 1+h
         n_correct = n_correct.gather(1, best_guess.unsqueeze(1)).squeeze(1)  # b
-        embeds = embeds.view(bsize, top_k, *embeds.size()[1:]).gather(
-            1, best_guess_unflat.unsqueeze(3).expand(-1, -1, -1, embeds.size(2))
-        ).squeeze(1)  # b 1+h d
+        embeds = (
+            embeds.view(bsize, top_k, *embeds.size()[1:])
+            .gather(
+                1, best_guess_unflat.unsqueeze(3).expand(-1, -1, -1, embeds.size(2))
+            )
+            .squeeze(1)
+        )  # b 1+h d
 
         # free all worst candidates and keep best candidates as parents
         parent_sequence_ids = []
         for parent_index, child_sequence_ids in enumerate(child_sequence_ids_list):
-            best_index = best_guess[parent_index].item()
+            best_index = int(best_guess[parent_index].item())
 
             # free all bad candidates
-            kv_cache_manager.free_sequences(child_sequence_ids[:best_index] + child_sequence_ids[best_index + 1:])
+            kv_cache_manager.free_sequences(
+                child_sequence_ids[:best_index] + child_sequence_ids[best_index + 1 :]
+            )
 
             # decrease the context length of the sequence which used to be sequence length + n_adds by the number of incorrect tokens
             # for the correct candidate
             best_sequence_id = child_sequence_ids[best_index]
             parent_sequence_ids.append(best_sequence_id)
-            kv_cache_manager.remove_tokens(best_sequence_id, n_adds - n_correct[parent_index].item() - 1)
+            kv_cache_manager.remove_tokens(
+                best_sequence_id, n_adds - n_correct[parent_index].item() - 1
+            )
 
         # Toss any wrong speculator tokens
         next_vals_split = list(next_vals)
@@ -240,10 +264,11 @@ def speculative_generate(
     end_time = time.time()
     return result, n_steps, (end_time - start_time)
 
+
 def paged_generate(
     model: Union[Callable, torch.nn.Module],
     input_ids: torch.Tensor,
-    kv_cache_manager: Optional[PagedKVCacheManager],
+    kv_cache_manager: PagedKVCacheManager,
     max_seq_len: int = 2048,
     max_new_tokens: int = 256,
     temperature: float = 1.0,
@@ -304,9 +329,7 @@ def paged_generate(
 
         # get the cache data and position ids if using cache
         if sequence_ids is None:
-            num_tokens_per_sequence = torch.count_nonzero(
-                input_ids.T, dim=0
-            ).tolist()
+            num_tokens_per_sequence = torch.count_nonzero(input_ids.T, dim=0).tolist()
         else:
             num_tokens_per_sequence = [1 for _ in range(input_ids.size(0))]
 

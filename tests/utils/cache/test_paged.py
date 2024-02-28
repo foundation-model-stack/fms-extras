@@ -304,6 +304,7 @@ def test_free_sequences():
     assert kv_cache_manager.unused_keys.qsize() == total_num_gpu_blocks
     assert len(kv_cache_manager.cbg_map) == 0
 
+
 @pytest.mark.skipif(
     not torch.cuda.is_available(), reason="must have cuda to run paged attention tests"
 )
@@ -329,18 +330,24 @@ def test_free_sequences_recursive():
     )
     assert len(kv_cache_manager.cbg_map) == len(sequence_lengths)
 
-    child_sequence_ids = kv_cache_manager.add_child_sequences(cache_data.sequence_ids[0], 3)
+    child_sequence_ids = kv_cache_manager.add_child_sequences(
+        cache_data.sequence_ids[0], 3
+    )
     all_leaf_sequence_ids = [cache_data.sequence_ids[1]] + child_sequence_ids
-    kv_cache_manager.allocate_tokens([1 for _ in all_leaf_sequence_ids], all_leaf_sequence_ids)
-    assert len(kv_cache_manager.free_blocks) == total_num_gpu_blocks - 7 # +3 for copied child sequences, +1 for new block
-    assert kv_cache_manager.unused_keys.qsize() == total_num_gpu_blocks - (len(
-        all_leaf_sequence_ids
-    ) + 1) # +1 for the original parent of the children
-    assert len(kv_cache_manager.cbg_map) == (len(sequence_lengths) + 3) # +3 for the new child sequences
+    kv_cache_manager.allocate_tokens(
+        [1 for _ in all_leaf_sequence_ids], all_leaf_sequence_ids
+    )
+    assert (
+        len(kv_cache_manager.free_blocks) == total_num_gpu_blocks - 7
+    )  # +3 for copied child sequences, +1 for new block
+    assert kv_cache_manager.unused_keys.qsize() == total_num_gpu_blocks - (
+        len(all_leaf_sequence_ids) + 1
+    )  # +1 for the original parent of the children
+    assert len(kv_cache_manager.cbg_map) == (
+        len(sequence_lengths) + 3
+    )  # +3 for the new child sequences
 
     kv_cache_manager.free_sequences(all_leaf_sequence_ids, recursive=True)
     assert len(kv_cache_manager.free_blocks) == total_num_gpu_blocks
     assert kv_cache_manager.unused_keys.qsize() == total_num_gpu_blocks
     assert len(kv_cache_manager.cbg_map) == 0
-
-

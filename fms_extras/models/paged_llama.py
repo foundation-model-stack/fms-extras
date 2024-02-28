@@ -5,30 +5,37 @@ import re
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Optional, Tuple, MutableMapping, List
+from typing import List, Mapping, MutableMapping, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
-from torch._C._distributed_c10d import ProcessGroup
-
-from fms import models, distributed
+import torch.nn.functional as F
+from fms import distributed, models
 from fms.distributed.strategy import (
     DistributedStrategy,
     NoOpStrategy,
     UniformModelParallelStrategy,
 )
-from fms.distributed.tensorparallel import copy_to_tensor_model_parallel_region, \
-    reduce_from_tensor_model_parallel_region
+from fms.distributed.tensorparallel import (
+    copy_to_tensor_model_parallel_region,
+    reduce_from_tensor_model_parallel_region,
+)
 from fms.modules.attention import MultiHeadAttention
 from fms.modules.embedding import WordEmbedding
 from fms.modules.feedforward import GatedLinearUnit
 from fms.modules.layernorm import LayerNormParameterized
-from fms.modules.positions import RotaryEmbedding, PositionEncoder
+from fms.modules.positions import PositionEncoder, RotaryEmbedding
 from fms.modules.tp import TPModule
 from fms.utils import serialization
 from fms.utils.activation import str_to_activation
 from fms.utils.config import ModelConfig
-import torch.nn.functional as F
+from torch._C._distributed_c10d import ProcessGroup
+
+from fms_extras.utils.cache.paged import (
+    PagedAttentionCacheData,
+    PagedAttentionCacheDataLayer,
+)
+
 
 # params emb_dim heads layers lr
 #  7B    4096    32    32     3.0E-04
@@ -53,6 +60,7 @@ class PagedLLaMAConfig(ModelConfig):
     max_expected_seq_len: int = 4096
     ntk_scaling: bool = False
 
+
 class PagedMultiHeadAttention(MultiHeadAttention):
     """
     Performs multi-headed self- or cross-attention, with optional attention masking.
@@ -60,29 +68,48 @@ class PagedMultiHeadAttention(MultiHeadAttention):
     Note: this class extends MultiHeadAttention to enable tensor parallel support
     """
 
-    def __init__(self, emb_dim, emb_kq, emb_v, nheads, kvheads, p_dropout=None, use_bias=False,
-                 position_encoder: Optional[PositionEncoder] = None, gain=1):
-
-        super().__init__(emb_dim, emb_kq, emb_v, nheads, kvheads, p_dropout, use_bias, position_encoder, gain)
+    def __init__(
+        self,
+        emb_dim,
+        emb_kq,
+        emb_v,
+        nheads,
+        kvheads,
+        p_dropout=None,
+        use_bias=False,
+        position_encoder: Optional[PositionEncoder] = None,
+        gain=1,
+    ):
+        super().__init__(
+            emb_dim,
+            emb_kq,
+            emb_v,
+            nheads,
+            kvheads,
+            p_dropout,
+            use_bias,
+            position_encoder,
+            gain,
+        )
 
     def to_tp(self, group: ProcessGroup) -> "TPPagedMultiHeadAttention":
         return TPPagedMultiHeadAttention.import_module(self, group)
 
     def forward(
         self,
-        q,
-        k,
-        v,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
-        position_ids=None,
-        attn_algorithm=None,
-        cache_data_layer=None,
-        use_cache=False,
-        is_self=True,
-        is_causal_mask=False,
+        position_ids: Optional[torch.Tensor] = None,
+        attn_algorithm: Optional[str] = None,
+        cache_data_layer: Optional[PagedAttentionCacheDataLayer] = None,
+        use_cache: bool = False,
+        is_self: bool = True,
+        is_causal_mask: bool = False,
     ):
         """
-        cache_data_layer: CacheDataLayer, optional
+        cache_data_layer: PagedAttentionCacheDataLayer, optional
             A single layer of the cache (default is None)
         position_ids: Optional[torch.LongTensor]
             The position of each of the tokens encoded in q and k. Used for RoPE embeddings
@@ -107,9 +134,7 @@ class PagedMultiHeadAttention(MultiHeadAttention):
         queries = self.query(q).view(
             batch_size, q_len, self.nheads, self.emb_kq_per_head
         )
-        keys = self.key(k).view(
-            batch_size, q_len, self.kvheads, self.emb_kq_per_head
-        )
+        keys = self.key(k).view(batch_size, q_len, self.kvheads, self.emb_kq_per_head)
         values = self.value(v).view(
             batch_size, q_len, self.kvheads, self.emb_v_per_head
         )
@@ -128,7 +153,7 @@ class PagedMultiHeadAttention(MultiHeadAttention):
         if use_cache and cache_data_layer:
             keys, values = cache_data_layer.store(keys, values)
 
-        if cache_data_layer and cache_data_layer.is_filled():
+        if use_cache and cache_data_layer and cache_data_layer.is_filled():
             attn = cache_data_layer.attend(queries, keys, values)
         # otherwise we always fall back into SDPA as this is either a prompt or it is a single contiguous cache
         else:
@@ -201,14 +226,14 @@ class PagedMultiHeadAttention(MultiHeadAttention):
         out = self.dense(attn)
 
         # if use_cache=True, we return the hidden_state as well as the kv cache
-        if use_cache:
+        if use_cache and cache_data_layer:
             # note: needed to add this check to return the data_layer as it fails compile otherwise
             return out, cache_data_layer.data_layer
         else:
             return out
 
-class TPPagedMultiHeadAttention(PagedMultiHeadAttention, TPModule):
 
+class TPPagedMultiHeadAttention(PagedMultiHeadAttention, TPModule):
     def __init__(
         self,
         emb_dim,
@@ -271,16 +296,16 @@ class TPPagedMultiHeadAttention(PagedMultiHeadAttention, TPModule):
 
     def forward(
         self,
-        q,
-        k,
-        v,
-        mask=None,
-        position_ids=None,
-        attn_algorithm=None,
-        cache_data_layer=None,
-        use_cache=False,
-        is_self=True,
-        is_causal_mask=False,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        attn_algorithm: Optional[str] = None,
+        cache_data_layer: Optional[PagedAttentionCacheDataLayer] = None,
+        use_cache: bool = False,
+        is_self: bool = True,
+        is_causal_mask: bool = False,
     ):
         """
         Check MultiHeadAttention for up-to-date arguments and docs
@@ -368,16 +393,15 @@ class PagedLLaMABlock(nn.Module):
 
     def forward(
         self,
-        x,
+        x: torch.Tensor,
         *,
-        mask=None,
-        position_ids=None,
-        cache_data_layer=None,
-        use_cache=False,
-        is_causal_mask=False,
-        attn_algorithm=None,
+        mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        cache_data_layer: Optional[PagedAttentionCacheDataLayer] = None,
+        use_cache: bool = False,
+        is_causal_mask: bool = False,
+        attn_algorithm: Optional[str] = None,
     ):
-
         # first we do MHA and Add&Norm
         residual = x
         x = self.ln(x)
@@ -415,12 +439,10 @@ class PagedLLaMABlock(nn.Module):
         else:
             return x
 
-class PagedLLaMAHeadless(nn.Module):
 
+class PagedLLaMAHeadless(nn.Module):
     def __init__(
-        self,
-        config: PagedLLaMAConfig,
-        distributed_strategy: DistributedStrategy
+        self, config: PagedLLaMAConfig, distributed_strategy: DistributedStrategy
     ):
         super(PagedLLaMAHeadless, self).__init__()
         self.config = config
@@ -474,15 +496,14 @@ class PagedLLaMAHeadless(nn.Module):
             self.dropout = nn.Dropout(self.config.p_dropout)
 
     def forward(
-            self,
-            x_in,
-            mask=None,
-            position_ids=None,
-            cache_data=None,
-            use_cache=False,
-            attn_algorithm=None,
+        self,
+        x_in: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        cache_data: Optional[PagedAttentionCacheData] = None,
+        use_cache: bool = False,
+        attn_algorithm: Optional[str] = None,
     ):
-
         qlen = x_in.size(1)
         filled_cache = False
 
@@ -534,7 +555,6 @@ class PagedLLaMAHeadless(nn.Module):
         return dec_out, present_key_value_states
 
 
-
 class PagedLLaMA(nn.Module):
     def __init__(
         self,
@@ -571,15 +591,48 @@ class PagedLLaMA(nn.Module):
 
     def forward(
         self,
-        x,
-        mask=None,
-        position_ids=None,
-        cache_data=None,
-        use_cache=False,
-        only_last_token=False,
-        attn_algorithm=None,
-        return_embeds=False,
-    ):
+        x: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        cache_data: Optional[PagedAttentionCacheData] = None,
+        use_cache: bool = False,
+        only_last_token: bool = False,
+        attn_algorithm: Optional[str] = None,
+        return_embeds: bool = False,
+    ) -> Union[
+        torch.Tensor,
+        Tuple[torch.Tensor, torch.Tensor],
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    ]:
+        """
+        main forward pass for a paged llama model
+
+        Args:
+            x: torch.Tensor
+                the input ids as a long type
+            mask: torch.Tensor, optional
+                an optional mask to be used in SDPA. If None, no mask will be used
+            position_ids: torch.Tensor, optional
+                the optional position ids to be used with rotary embeddings. If None, will just be positions ids
+                starting at position 0 for each sequence in the batch
+            cache_data: PagedAttentionCacheData, optional
+                the optional cache data used in paged attention. If None is given, SDPA will always be used
+            use_cache: bool
+                denotes whether a cache should be used. If True, the cache will be returned as well as the logits
+            only_last_token: bool
+                only return the last token from embedding output
+            attn_algorithm: str, optional
+                string to denote which attention algorithm to use
+            return_embeds: bool
+                If True, will return the embeddings, otherwise wil not return embeddings
+
+        Returns:
+        Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
+            if use_cache and return_embeds is True => (logits, cache, embeds)
+            if use_cache is True => (logits, cache)
+            if return_embeds is True => (logits, embeds)
+            otherwise => logits
+        """
         embeds, cache = self.headless_model(
             x,
             mask,
@@ -601,7 +654,8 @@ class PagedLLaMA(nn.Module):
             out.append(embeds)
         if len(out) == 1:
             return out[0]
-        return out
+        else:
+            return tuple(out)
 
 
 # Register common LLaMA variants with the model registration API
@@ -687,7 +741,9 @@ def _hf_sd_to_fms_sd(hf_sd: Mapping) -> Mapping:
     ]
     new_sd = {}
 
-    trans_required_pattern = re.compile("headless_model.layers.[0-9]+.attn.(query|key).weight")
+    trans_required_pattern = re.compile(
+        "headless_model.layers.[0-9]+.attn.(query|key).weight"
+    )
     for name, param in hf_sd.items():
         new_name = name
         for pattern, repl in replacements:

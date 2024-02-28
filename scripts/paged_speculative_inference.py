@@ -5,13 +5,14 @@ import time
 
 import torch
 import torch._inductor.config
-from torch import distributed as dist
-
 from fms.models import get_model
 from fms.utils import generation, tokenizers
-from fms_extras.models.speculator import MLPSpeculator
-from fms_extras.utils.generation import speculative_generate, paged_generate
+from torch import distributed as dist
+
 import fms_extras.models.paged_llama
+from fms_extras.models.speculator import MLPSpeculator
+from fms_extras.utils.generation import paged_generate, speculative_generate
+
 
 # This example script validates the LLaMA implementation by running inference on a couple of prompts.
 # torchrun --nproc_per_node=1 scripts/inference.py --variant=7b --model_path=~/models/7B-F --tokenizer=~/models/tokenizer.model --model_source=meta --speculator_path=~/models/speculator_7B_F.pth --compile
@@ -127,7 +128,9 @@ torch.set_grad_enabled(False)
 speculator = None
 if args.speculator_path is not None:
     print("loading speculator")
-    speculator = MLPSpeculator(model.config.emb_dim, 4096, model.config.src_vocab_size, n_predict=3)
+    speculator = MLPSpeculator(
+        model.config.emb_dim, 4096, model.config.src_vocab_size, n_predict=3
+    )
     speculator.load_state_dict(
         torch.load(args.speculator_path, map_location=device)["model_state"]
     )
@@ -137,6 +140,7 @@ if args.speculator_path is not None:
 print("initializing paged cache")
 # cache setup
 from fms_extras.utils.cache.paged import PagedKVCacheManager
+
 
 use_cache = True
 kv_cache_manager = PagedKVCacheManager(
@@ -150,12 +154,14 @@ kv_cache_manager = PagedKVCacheManager(
 )
 print("cache initialization complete on rank", local_rank)
 
+
 def ids_for_prompt(prompt):
     tokens = tokenizer.tokenize(prompt)
     tokens = ["<s>"] + tokens
     ids = tokenizer.convert_tokens_to_ids(tokens)
     ids = torch.tensor(ids, dtype=torch.long, device=device)
     return ids
+
 
 def print_result(result, inp, n_steps):
     if local_rank != 0:
@@ -183,9 +189,9 @@ def infer(ids, warmup):
             model,
             ids,
             speculator,
+            kv_cache_manager,
             new_tokens=100,
             max_seq_len=model.config.max_expected_seq_len,
-            kv_cache_manager=kv_cache_manager,
             decode_model=decode_model,
         )
     else:
@@ -202,9 +208,10 @@ def infer(ids, warmup):
         total_tokens = 0
         for i in range(len(result)):
             print_result(result[i], ids[i], n_steps)
-            total_tokens += (len(result[i]) - len(ids[i]))
+            total_tokens += len(result[i]) - len(ids[i])
         avg_tokens = total_tokens / len(result)
         print(f"time per token: {generated_token_time_out / avg_tokens}")
+
 
 if args.compile:
     print("compiling model")
@@ -219,9 +226,7 @@ if args.compile:
 
 template = "Below is an instruction that describes a task. Write a response that appropriately completes the request.\n\n### Instruction:\n{}\n\n### Response:"
 
-prompt1 = template.format(
-    "Provide a list of instructions for preparing chicken soup."
-)
+prompt1 = template.format("Provide a list of instructions for preparing chicken soup.")
 prompt2 = template.format("Explain some popular greetings in Spanish.")
 prompt3 = template.format("Explain to me why ignorance is bliss.")
 prompt4 = template.format(

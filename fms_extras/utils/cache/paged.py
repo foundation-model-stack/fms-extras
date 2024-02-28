@@ -15,7 +15,8 @@ from fms_extras.utils.cache import (
     CacheDataLayer,
     CacheDataWithMetadata,
     KVCache,
-    KVCacheManager, select_inflate_dim,
+    KVCacheManager,
+    select_inflate_dim,
 )
 
 
@@ -305,7 +306,6 @@ class PagedAttentionCacheDataLayer(AttentionComputationMixin, CacheDataLayer):
     def store(
         self, keys: torch.Tensor, values: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-
         if self.unflatten_indices is not None:
             # inp: n' h d
             # inds: b k n
@@ -532,7 +532,9 @@ class CacheBlockGroup(List[CacheBlock]):
 
     def remove_tokens(self, num_tokens: int) -> List[CacheBlock]:
         # remove tokens and return the blocks to be freed
-        prefix_sequence_length = 0 if self.prefix is None else self.prefix.get_sequence_length()
+        prefix_sequence_length = (
+            0 if self.prefix is None else self.prefix.get_sequence_length()
+        )
 
         if num_tokens > (self.get_sequence_length() - prefix_sequence_length):
             raise ValueError(
@@ -732,8 +734,6 @@ class PagedKVCacheManager(KVCacheManager):
                     self.free(prefix_cbg.sequence_id)
                 prefix_cbg = prefix_cbg.prefix
 
-
-
     def _get_unassigned_sequence_id(self) -> int:
         return self._get_unassigned_sequence_ids(1)[0]
 
@@ -803,14 +803,16 @@ class PagedKVCacheManager(KVCacheManager):
             head_size=self.head_size,
             is_generating=not is_prompt,
             sequence_ids=sequence_ids,
-            query_length=0 if max_num_tokens_per_sequence is None else max_num_tokens_per_sequence,
+            query_length=0
+            if max_num_tokens_per_sequence is None
+            else max_num_tokens_per_sequence,
         )
 
     def allocate_tokens(
         self,
         num_tokens_per_sequence: List[int],
         sequence_ids: Optional[List[int]] = None,
-    ) -> CacheDataWithMetadata:
+    ) -> PagedAttentionCacheData:
         if sequence_ids is None:
             return self._allocate_prompt_tokens(num_tokens_per_sequence)
         else:
