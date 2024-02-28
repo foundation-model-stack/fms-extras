@@ -246,10 +246,20 @@ KVCache = Tuple[torch.Tensor, torch.Tensor]  # (key cache, value cache)
 
 
 def flatten_batch(inp):
-    # Takes a bsize x n_candidates x candidate_len rectangular batch of input indices
-    # Returns 1) a flattened set of indices with all redundant tokens removed,
-    # and 2) a tensor, sized as input, mapping each input token to its slot in output,
-    # and 3) a tensor, sized as output, mapping each output token to slot in flattened input
+    """
+    Takes a speculator suffix tree: a bsize x n_candidates x candidate_len rectangular batch
+    of token indices, and flattens it while removing redundant tokens. For example, given:
+    a b c
+    a b d
+    a e f
+    Tokens 'a b' in line 2 and token 'a' in line 3 are functionally equivalent to 'a b' in
+    line 1, so the flattened batch returns `a b c d e f`
+
+    Returns:
+    1) the flattened, pruned input
+    2) a tensor, sized as input, mapping each input token to its slot in output
+    3) a tensor, sized as output, mapping each output token to its slot in the flattened input
+    """
     ind_out = torch.zeros_like(inp)
     inp = inp.tolist()
     out = []
@@ -286,8 +296,15 @@ def flatten_batch(inp):
 
 
 def select_inflate_dim(inp, inds, dim=0):
-    # Takes a flattened input of size ([...] x n x [...]) with n in slot dim, and token mappings of size (a x ... x z)
-    # and over/under-samples on n to create output tensor with size ([...] x a x ... x z x [...])
+    """
+    Takes an input of size ([...], n, [...]), with n in slot corresponding to value of dim,
+    and tensor of indices of size (a, ..., z). Using those indices we over/under sample the
+    input on dimension n, to create output tensor with size ([...], (a, ..., z), [...]).
+    
+    i.e. if dim=0, inp has size (6,3,2), and inds has size (8,4), then:
+    1) max(inds) < 6
+    2) output has size (8,4,3,2)
+    """
     inds_shape = inds.size()
     inp_shape = inp.size()
     out = inp.index_select(dim, inds.view(-1))
