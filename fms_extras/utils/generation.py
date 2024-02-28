@@ -277,24 +277,29 @@ def paged_generate(
     decode_model: Optional[Union[Callable, torch.nn.Module]] = None,
 ):
     """
-    A trivial generate function that can be used for validation/testing in
-    cases where HF is not available.
-    We could add implementations for other types of generation, but this is
-    enough for making sure a model is working.
-    Does not implement batching nor beam search, but those could be added.
+    A trivial generate function that can be used for validation/testing generation using paged attention
 
     Args:
-        model: A function or nn.Module that takes a batch of input_ids and
-            returns logits
-        prefix: A tensor of token IDs.
-        max_seq_len: the sequence length of the model
-        max_new_tokens: max tokens to generate
-        temperature: temperature of softmax when sampling
-        top_k: only search among top k tokens
-        do_sample: multinomial sampling. False for greedy.
-        num_beams: TODO: support beam search
-        use_cache: requires that the model accept use_cache and
-            past_key_value_states args in forward method.
+        model: Callable or nn.Module
+            A function or nn.Module that takes a batch of input_ids and returns logits
+        kv_cache_manager: PagedKVCacheManager
+            the paged KVCacheManager that handles management of the kv-cache for paged attention
+        max_seq_len: int
+            the max sequence length of the model
+        max_new_tokens: int
+            max tokens to generate
+        temperature: float
+            temperature of softmax when sampling
+        top_k: int
+            only search among top k tokens
+        do_sample: bool
+            multinomial sampling. False for greedy.
+        decode_model: Callable or nn.Module, optional
+            a model to used specifically for decode step. If not given, the model input will be used for decode step
+
+    Returns:
+    Tuple[torch.Tensor, int, int]
+        the resulting output tokens, the number of new tokens generated, and the time it took per token in seconds
     """
     if decode_model is None:
         decode_model = model
