@@ -4,8 +4,11 @@ from typing import Any, Callable, List, MutableMapping, Optional, Union
 import torch
 import torch.nn.functional as F
 
-from fms_extras.models.speculator import MLPSpeculator
-from fms_extras.utils.cache import flatten_batch, select_inflate_dim
+from fms_extras.models.speculator import (
+    MLPSpeculator,
+    flatten_batch,
+    select_inflate_dim,
+)
 from fms_extras.utils.cache.paged import PagedAttentionCacheData, PagedKVCacheManager
 
 

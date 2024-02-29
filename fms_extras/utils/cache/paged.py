@@ -9,6 +9,7 @@ import torch._inductor.lowering as lowering
 from torch._dynamo import mark_static_address
 from torch._inductor.virtualized import V
 
+from fms_extras.models.speculator import select_inflate_dim
 from fms_extras.paged_c import attn_ops, cache_ops  # type: ignore
 from fms_extras.utils.cache import (
     AttentionComputationMixin,
@@ -16,7 +17,6 @@ from fms_extras.utils.cache import (
     CacheDataWithMetadata,
     KVCache,
     KVCacheManager,
-    select_inflate_dim,
 )
 
 
