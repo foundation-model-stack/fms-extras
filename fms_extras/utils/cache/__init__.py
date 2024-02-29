@@ -245,20 +245,29 @@ class KVCacheManager(metaclass=abc.ABCMeta):
 KVCache = Tuple[torch.Tensor, torch.Tensor]  # (key cache, value cache)
 
 
-def flatten_batch(inp):
+def flatten_batch(inp: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Takes a speculator suffix tree: a bsize x n_candidates x candidate_len rectangular batch
-    of token indices, and flattens it while removing redundant tokens. For example, given:
+    of token indices, and flattens it while removing redundant tokens.
+
+    For example, given:
+
     a b c
     a b d
     a e f
+
     Tokens 'a b' in line 2 and token 'a' in line 3 are functionally equivalent to 'a b' in
     line 1, so the flattened batch returns `a b c d e f`
 
+    Args:
+        inp: torch.Tensor
+            speculator suffix tree
+
     Returns:
-    1) the flattened, pruned input
-    2) a tensor, sized as input, mapping each input token to its slot in output
-    3) a tensor, sized as output, mapping each output token to its slot in the flattened input
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+            1) the flattened, pruned input
+            2) a tensor, sized as input, mapping each input token to its slot in output
+            3) a tensor, sized as output, mapping each output token to its slot in the flattened input
     """
     ind_out = torch.zeros_like(inp)
     inp = inp.tolist()
@@ -295,15 +304,29 @@ def flatten_batch(inp):
     )
 
 
-def select_inflate_dim(inp, inds, dim=0):
+def select_inflate_dim(
+    inp: torch.Tensor, inds: torch.Tensor, dim: int = 0
+) -> torch.Tensor:
     """
     Takes an input of size ([...], n, [...]), with n in slot corresponding to value of dim,
     and tensor of indices of size (a, ..., z). Using those indices we over/under sample the
     input on dimension n, to create output tensor with size ([...], (a, ..., z), [...]).
-    
+
     i.e. if dim=0, inp has size (6,3,2), and inds has size (8,4), then:
     1) max(inds) < 6
     2) output has size (8,4,3,2)
+
+    Args:
+        inp: torch.Tensor
+            tensor of inputs
+        inds: torch.Tensor
+            tensor of indices
+        dim: int
+            dimension to sample on
+
+    Returns:
+        torch.Tensor
+            output tensor with new size ([...], (a, ..., z), [...])
     """
     inds_shape = inds.size()
     inp_shape = inp.size()
