@@ -80,8 +80,21 @@ parser.add_argument(
     help="This is a distributed job (multiple instances run with RANK+WORLD_SIZE)",
 )
 parser.add_argument("--context_file", type=str, default=None, help="File to summarize")
+parser.add_argument(
+    "--batch_input",
+    action="store_true",
+    help="use a batch of prompts as input (note this is still wip for reduce-overhead=True)",
+)
 
 args = parser.parse_args()
+
+if args.batch_input and args.compile and args.compile_mode == "reduce-overhead":
+    print(
+        "setting compile_mode to default as cudagraphs is not yet supported with batches"
+    )
+    compile_mode = "default"
+else:
+    compile_mode = args.compile_mode
 
 local_rank = int(os.getenv("LOCAL_RANK", 0))
 world_size = int(os.getenv("WORLD_SIZE", 1))
@@ -184,6 +197,8 @@ def infer(ids, warmup):
     if local_rank == 0:
         print("==================")
 
+    cudagraphs = compile_mode == "reduce-overhead"
+
     if speculator:
         result, n_steps, generated_token_time_out = speculative_generate(
             model,
@@ -193,6 +208,9 @@ def infer(ids, warmup):
             new_tokens=100,
             max_seq_len=model.config.max_expected_seq_len,
             decode_model=decode_model,
+            # todo: we can only reduce-overhead for now when batch size is 1
+            flatting=not (args.compile and compile_mode == "reduce-overhead"),
+            cudagraphs=cudagraphs,
         )
     else:
         result, n_steps, generated_token_time_out = paged_generate(
@@ -203,6 +221,7 @@ def infer(ids, warmup):
             max_seq_len=model.config.max_expected_seq_len,
             do_sample=False,
             decode_model=decode_model,
+            cudagraphs=cudagraphs,
         )
     if not warmup:
         total_tokens = 0
@@ -219,10 +238,13 @@ if args.compile:
     torch._inductor.config.joint_graph_constant_folding = False
     # compiling can make first inference pass slow
     decode_model = model
-    decode_model = torch.compile(decode_model, mode=args.compile_mode, fullgraph=True)
+    decode_model = torch.compile(decode_model, mode=compile_mode, fullgraph=True)
     model = torch.compile(model, fullgraph=True, dynamic=True)
     if speculator:
-        speculator = torch.compile(speculator, mode=args.compile_mode)
+        speculator = torch.compile(speculator, mode=compile_mode)
+        speculator.generate_suffixes = torch.compile(
+            speculator.generate_suffixes, mode=compile_mode
+        )
 
 template = "Below is an instruction that describes a task. Write a response that appropriately completes the request.\n\n### Instruction:\n{}\n\n### Response:"
 
@@ -238,9 +260,12 @@ prompt2 = ids_for_prompt(prompt2)
 prompt3 = ids_for_prompt(prompt3)
 prompt4 = ids_for_prompt(prompt4)
 
-# ids = [prompt1, prompt2, prompt3, prompt4]
-ids = [prompt1]
+if args.batch_input:
+    ids = [prompt1, prompt2, prompt3, prompt4]
+else:
+    ids = [prompt1]
 
 infer(ids, warmup=True)
 print("generating output", local_rank)
+infer(ids, warmup=True)
 infer(ids, warmup=False)

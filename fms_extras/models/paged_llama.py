@@ -88,18 +88,22 @@ class PagedMultiHeadAttention(nn.Module):
         self.emb_v_per_head = emb_v
         self.p_dropout = p_dropout if p_dropout is not None else 0.0
         self.use_bias = use_bias
-        self.query = nn.Linear(
-            self.emb_dim, self.nheads * self.emb_kq_per_head, bias=use_bias
-        )
-        self.key = nn.Linear(
-            self.emb_dim, self.kvheads * self.emb_kq_per_head, bias=use_bias
-        )
-        self.value = nn.Linear(
-            self.emb_dim, self.kvheads * self.emb_v_per_head, bias=use_bias
-        )
         self.dense = nn.Linear(
             self.nheads * self.emb_v_per_head, self.emb_dim, bias=use_bias
         )
+
+        self.splits = [
+            self.nheads * self.emb_kq_per_head,
+            self.kvheads * self.emb_kq_per_head,
+            self.kvheads * self.emb_v_per_head,
+        ]
+
+        self.qkv_fused = nn.Linear(
+            self.emb_dim,
+            sum(self.splits),
+            bias=use_bias,
+        )
+
         if self.p_dropout:
             self.attn_dropout = nn.Dropout(self.p_dropout)
         self.position_encoder = position_encoder
@@ -113,21 +117,18 @@ class PagedMultiHeadAttention(nn.Module):
 
     def reset_params(self, gain=1):
         # Ensure softmax inputs are standard normal
-        for layer in ["query", "key"]:
-            nn.init.trunc_normal_(
-                getattr(self, layer).weight, mean=0.0, std=self.emb_dim**-0.5
-            )
+        self.qkv_fused.weight.data[
+            : self.emb_kq_per_head * (self.nheads + self.kvheads)
+        ].normal_(0, self.emb_dim**-0.5)
         # Ensure projection layers have same scale (for normalized-step dataloaders like
         # AdamW / Sophia), and maintain input norm up to attention remix, in expectation
-        for layer in ["value", "dense"]:
-            nn.init.trunc_normal_(
-                getattr(self, layer).weight,
-                mean=0.0,
-                std=(gain / (self.emb_dim * self.nheads * self.emb_v_per_head) ** 0.5)
-                ** 0.5,
-            )  # Using explicit terms instead of numel to account for eventual MQA addition
+        self.qkv_fused.weight.data[
+            self.emb_kq_per_head * (self.nheads + self.kvheads) :
+        ].normal_(
+            0, (gain / (self.emb_dim * self.nheads * self.emb_v_per_head) ** 0.5) ** 0.5
+        )
         if self.use_bias:
-            for layer in ["query", "key", "value", "dense"]:
+            for layer in ["qkv_fused", "dense"]:
                 getattr(self, layer).bias.data.zero_()
 
     def to_tp(self, group: ProcessGroup) -> "TPPagedMultiHeadAttention":
@@ -169,13 +170,11 @@ class PagedMultiHeadAttention(nn.Module):
         # mask: batch_size x seq_len x seq_len
         batch_size, q_len, _ = q.size()
 
-        queries = self.query(q).view(
-            batch_size, q_len, self.nheads, self.emb_kq_per_head
-        )
-        keys = self.key(k).view(batch_size, q_len, self.kvheads, self.emb_kq_per_head)
-        values = self.value(v).view(
-            batch_size, q_len, self.kvheads, self.emb_v_per_head
-        )
+        queries, keys, values = self.qkv_fused(q).split(self.splits, dim=-1)
+
+        queries = queries.view(batch_size, q_len, self.nheads, self.emb_kq_per_head)
+        keys = keys.view(batch_size, q_len, self.kvheads, self.emb_kq_per_head)
+        values = values.view(batch_size, q_len, self.kvheads, self.emb_v_per_head)
 
         # You want to apply rotary embeddings pre-cache
         if self.position_encoder is not None:
@@ -306,10 +305,7 @@ class TPPagedMultiHeadAttention(PagedMultiHeadAttention, TPModule):
         self.setup_tp(rank, world_size)
 
     def colwise_param_names(self) -> List[str]:
-        colwise_weights = ["query"]
-        if self.kvheads != 1:
-            colwise_weights.append("key")
-            colwise_weights.append("value")
+        colwise_weights = ["qkv_fused"]
         return colwise_weights
 
     def rowwise_param_names(self) -> List[str]:
@@ -758,6 +754,25 @@ def _rename_weights_to_fms(orig_sd):
             new_name = re.sub(pattern, repl, new_name)
         new_sd[new_name] = param
 
+        # llama in meta has unfused qkv attn weights, so these weights must be converted to fused weights in fms
+        if (
+            "attn.query" in new_name
+            or "attn.key" in new_name
+            or "attn.value" in new_name
+        ):
+            unfused_weights = [
+                re.sub(r"w[qkv]", "wq", name),
+                re.sub(r"w[qkv]", "wk", name),
+                re.sub(r"w[qkv]", "wv", name),
+            ]
+            missing_weights = [w for w in unfused_weights if w not in orig_sd.keys()]
+            if len(missing_weights) != 0:
+                raise serialization.FusableWeightsMissingError(missing_weights)
+
+            new_sd[
+                re.sub(r"attn.(query|key|value)", "attn.qkv_fused", new_name)
+            ] = torch.cat([orig_sd[w] for w in unfused_weights], dim=0)
+
     return new_sd
 
 
@@ -779,30 +794,48 @@ def _hf_sd_to_fms_sd(hf_sd: Mapping) -> Mapping:
     ]
     new_sd = {}
 
-    trans_required_pattern = re.compile(
-        "headless_model.layers.[0-9]+.attn.(query|key).weight"
-    )
     for name, param in hf_sd.items():
         new_name = name
         for pattern, repl in replacements:
             new_name = re.sub(pattern, repl, new_name)
         new_sd[new_name] = param
 
-        # hf -> fms requires a transpose operation for the query and key
-        if bool(trans_required_pattern.match(new_name)):
-            temp = new_sd[new_name]
-            # nheads is used in the transformation required for hf->fms
-            # here we are using 128 as this value fits with all popular models
-            #   7B, 13B, 70B to recover the number of heads
-            nheads = int(temp.size(0) / 128)
+        # llama in hf has unfused qkv attn weights, so these weights must be converted to fused weights in fms
+        if (
+            "attn.query" in new_name
+            or "attn.key" in new_name
+            or "attn.value" in new_name
+        ):
+            unfused_weights = [
+                re.sub(r"self_attn\.[kvq]_proj", "self_attn.q_proj", name),
+                re.sub(r"self_attn\.[kvq]_proj", "self_attn.k_proj", name),
+                re.sub(r"self_attn\.[kvq]_proj", "self_attn.v_proj", name),
+            ]
+            missing_weights = [w for w in unfused_weights if w not in hf_sd.keys()]
+            if len(missing_weights) != 0:
+                raise serialization.FusableWeightsMissingError(missing_weights)
 
-            temp = (
-                temp.view(nheads, 2, -1, temp.size(1))
-                .transpose(1, 2)
-                .reshape(*temp.size())
-            )
+            raw_mapping = {w: hf_sd[w] for w in unfused_weights}
 
-            new_sd[new_name] = temp
+            # q=0, k=1
+            for unfused_weight_key in unfused_weights[:2]:
+                temp = raw_mapping[unfused_weight_key]
+                # nheads is used in the transformation required for hf->fms
+                # here we are using 128 as this value fits with all popular models
+                #   7B, 13B, 70B to recover the number of heads
+                nheads = int(temp.size(0) / 128)
+
+                temp = (
+                    temp.view(nheads, 2, -1, temp.size(1))
+                    .transpose(1, 2)
+                    .reshape(*temp.size())
+                )
+
+                raw_mapping[unfused_weight_key] = temp
+
+            new_sd[
+                re.sub(r"attn.(query|key|value)", "attn.qkv_fused", new_name)
+            ] = torch.cat([raw_mapping[w] for w in unfused_weights], dim=0)
 
     return new_sd
 

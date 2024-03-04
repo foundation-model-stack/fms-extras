@@ -1,3 +1,4 @@
+import functools
 import time
 from typing import Any, Callable, List, MutableMapping, Optional, Union
 
@@ -23,6 +24,8 @@ def speculative_generate(
     threshes=[5, 3, 2],
     flatting=True,
     decode_model: Optional[Union[Callable, torch.nn.Module]] = None,
+    # todo: This is a WIP to enable cudagraphs, currently its only for batch_size=1
+    cudagraphs: bool = False,
 ):
     """
     A reference implementation of speculative decoding generation.
@@ -53,6 +56,12 @@ def speculative_generate(
     if decode_model is None:
         decode_model = model
     bsize = len(input_ids)
+
+    if cudagraphs and (flatting or bsize != 1):
+        raise NotImplementedError(
+            "cudagraphs is not yet supported for batch sizes greater than 1 or flatting"
+        )
+
     result = input_ids  # [b] n
     # Build padded batched input tensor
     max_len = max([seq.size(0) for seq in input_ids])
@@ -108,6 +117,7 @@ def speculative_generate(
     n_gen = torch.zeros(bsize, device=inputs.device, dtype=torch.int)
     n_steps = 0
     input_ids = inputs[:, -1:]
+    block_mapping_max = ((max_len + new_tokens) // 16) + 1
     start_time = time.time()
     while min(n_gen) < new_tokens:
         n_steps += 1
@@ -178,7 +188,19 @@ def speculative_generate(
                 block_mappings, cache_data.flatten_indices
             )  # n' n_blocks
 
-        # pad for cudagraphs
+        # todo: This is a WIP to enable cudagraphs, currently its only for batch_size=1
+        if cudagraphs:
+            # pad for cudagraphs
+            block_mappings = torch.stack(
+                [
+                    F.pad(
+                        block_mappings[i],
+                        (0, block_mapping_max - block_mappings.size(1)),
+                    )
+                    for i in range(block_mappings.size(0))
+                ]
+            )
+
         cache_data.block_mapping = block_mappings
         cache_data.context_lengths = context_lengths
 
@@ -278,6 +300,8 @@ def paged_generate(
     top_k: int = 10,
     do_sample: bool = True,
     decode_model: Optional[Union[Callable, torch.nn.Module]] = None,
+    # todo: This is a WIP to enable cudagraphs, currently its only for batch_size=1
+    cudagraphs: bool = False,
 ):
     """
     A trivial generate function that can be used for validation/testing generation using paged attention
@@ -308,6 +332,12 @@ def paged_generate(
         decode_model = model
 
     bsize = len(input_ids)
+
+    if cudagraphs and bsize != 1:
+        raise NotImplementedError(
+            "cudagraphs is not yet supported for batch sizes greater than 1"
+        )
+
     # Build padded batched input tensor
     max_len = max([seq.size(0) for seq in input_ids])
     n_pads_init = [max_len - seq.size(0) for seq in input_ids]
@@ -321,7 +351,7 @@ def paged_generate(
     kwargs["cache_data"] = None
     kwargs["use_cache"] = True
     sequence_ids: Optional[List[int]] = None
-
+    block_mapping_max = ((max_len + max_new_tokens) // 16) + 1
     for i in range(max_new_tokens):
         input_ids = next_input[:, -max_seq_len:]
 
@@ -355,6 +385,20 @@ def paged_generate(
         if i == 0:
             logits, _ = model(input_ids, **kwargs)
         else:
+            # cudagraph requires static shapes
+            if cudagraphs:
+                block_mapping = kwargs["cache_data"].block_mapping
+                block_mapping = torch.stack(
+                    [
+                        F.pad(
+                            block_mapping[i],
+                            (0, block_mapping_max - block_mapping.size(1)),
+                        )
+                        for i in range(block_mapping.size(0))
+                    ]
+                )
+                kwargs["cache_data"].block_mapping = block_mapping
+
             logits, _ = decode_model(input_ids, **kwargs)
         logits = logits[:, -1, :]
 
