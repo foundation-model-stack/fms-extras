@@ -122,6 +122,10 @@ def speculative_generate(
     n_gen = torch.zeros(bsize, device=inputs.device, dtype=torch.int)
     n_steps = 0
     input_ids = torch.argmax(logits, dim=2)  # b 1
+    result = [
+        torch.cat((line, input_id), dim=0)
+        for line, input_id in zip(result, list(input_ids))
+    ]
     block_mapping_max = ((max_len + new_tokens) // 16) + 1
     start_time = time.time()
     while min(n_gen) < new_tokens:
@@ -243,7 +247,7 @@ def speculative_generate(
             )  # b k 1+h d
 
         # Check correctness of speculator predictions
-        test = input_ids_unflat[:, :, :-1].eq(next_vals[:, :, 1:]).cumprod(2)
+        test = input_ids_unflat[:, :, 1:].eq(next_vals[:, :, :-1]).cumprod(2)
         n_correct = test.sum(2).view(bsize, n_candidates)
         best_guess = n_correct.argmax(1)  # b
         best_guess_unflat = (
@@ -254,7 +258,7 @@ def speculative_generate(
         next_vals = next_vals.gather(1, best_guess_unflat).squeeze(1)  # b 1+h
         n_correct = n_correct.gather(1, best_guess.unsqueeze(1)).squeeze(1)  # b
         embeds = embeds.gather(
-            1, best_guess_unflat.unsqueeze(3).expand(-1, -1, -1, embeds.size(2))
+            1, best_guess_unflat.unsqueeze(3).expand(-1, -1, -1, embeds.size(3))
         ).squeeze(
             1
         )  # b 1+h d
