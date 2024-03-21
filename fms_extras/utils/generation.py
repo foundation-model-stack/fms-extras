@@ -121,7 +121,7 @@ def speculative_generate(
 
     n_gen = torch.zeros(bsize, device=inputs.device, dtype=torch.int)
     n_steps = 0
-    input_ids = logits.argmax(2)  # b 1
+    input_ids = torch.argmax(logits, dim=2)  # b 1
     block_mapping_max = ((max_len + new_tokens) // 16) + 1
     start_time = time.time()
     while min(n_gen) < new_tokens:
@@ -130,7 +130,9 @@ def speculative_generate(
         # create candidate sequences
         child_sequence_ids_list = []
         child_sequence_ids_flattened = []
-        num_tokens_per_sequence = [inp_len for _ in range(input_ids.size(0) * n_candidates)]
+        num_tokens_per_sequence = [
+            inp_len for _ in range(input_ids.size(0) * n_candidates)
+        ]
         # each parent will have n_candidates child sequences
         for parent_sequence_id in parent_sequence_ids:
             child_sequence_ids = kv_cache_manager.add_child_sequences(
@@ -146,7 +148,9 @@ def speculative_generate(
         position_ids = cache_data.compute_position_ids(num_tokens_per_sequence)
 
         # Get candidate set of speculations
-        input_ids = speculator.generate_suffixes(embeds, input_ids, threshes, n_candidates)  # b k h
+        input_ids = speculator.generate_suffixes(
+            embeds, input_ids, threshes, n_candidates
+        )  # b k h
         input_ids = torch.cat(
             [input_ids.unsqueeze(1).expand(bsize, n_candidates, 1), input_ids], dim=-1
         ).int()  # b k 1+h
@@ -234,10 +238,12 @@ def speculative_generate(
             embeds = select_inflate_dim(embeds[0], unflat_indices)  # b k 1+h d
         else:
             next_vals = next_vals.view(bsize, n_candidates, inp_len)  # b k 1+h
-            embeds = embeds.view(bsize, n_candidates, inp_len, embeds.size(2))  # b k 1+h d
+            embeds = embeds.view(
+                bsize, n_candidates, inp_len, embeds.size(2)
+            )  # b k 1+h d
         
         # Check correctness of speculator predictions
-        test = input_ids_unflat[:,:-1].eq(next_vals[:,1:]).cumprod(1)
+        test = input_ids_unflat[:, :-1].eq(next_vals[:, 1:]).cumprod(1)
         n_correct = test.sum(1).view(bsize, n_candidates)
         best_guess = n_correct.argmax(1)  # b
         best_guess_unflat = (
@@ -245,15 +251,12 @@ def speculative_generate(
         )  # b 1 1+h
 
         # Set global values to those of best guess
-        next_vals = (
-            next_vals.gather(1, best_guess_unflat).squeeze(1)
-        )  # b 1+h
+        next_vals = (next_vals.gather(1, best_guess_unflat).squeeze(1))  # b 1+h
         n_correct = n_correct.gather(1, best_guess.unsqueeze(1)).squeeze(1)  # b
-        embeds = (
-            embeds.gather(
-                1, best_guess_unflat.unsqueeze(3).expand(-1, -1, -1, embeds.size(2))
-            )
-            .squeeze(1)
+        embeds = embeds.gather(
+            1, best_guess_unflat.unsqueeze(3).expand(-1, -1, -1, embeds.size(2))
+        ).squeeze(
+            1
         )  # b 1+h d
 
         # free all non-best candidates and keep best candidates as parents
