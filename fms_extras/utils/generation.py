@@ -217,7 +217,7 @@ def speculative_generate(
         cache_data.block_mapping = block_mappings
         cache_data.context_lengths = context_lengths
 
-        input_ids_unflat = input_ids
+        input_ids_unflat = input_ids.view(bsize, n_candidates, inp_len)
         if this_flatting:
             input_ids = flat_inputs
 
