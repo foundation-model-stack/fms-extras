@@ -148,11 +148,11 @@ def speculative_generate(
         position_ids = cache_data.compute_position_ids(num_tokens_per_sequence)
 
         # Get candidate set of speculations
-        input_ids = speculator.generate_suffixes(
+        suffix_ids = speculator.generate_suffixes(
             embeds, input_ids, threshes, n_candidates
         )  # b k h
         input_ids = torch.cat(
-            [input_ids.unsqueeze(1).expand(bsize, n_candidates, 1), input_ids], dim=-1
+            [input_ids.unsqueeze(1).expand(bsize, n_candidates, 1), suffix_ids], dim=-1
         ).int()  # b k 1+h
 
         # Apply batch flattening / tree attention if compression is good enough
