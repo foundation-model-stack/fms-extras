@@ -241,7 +241,7 @@ def speculative_generate(
             embeds = embeds.view(
                 bsize, n_candidates, inp_len, embeds.size(2)
             )  # b k 1+h d
-        
+
         # Check correctness of speculator predictions
         test = input_ids_unflat[:, :-1].eq(next_vals[:, 1:]).cumprod(1)
         n_correct = test.sum(1).view(bsize, n_candidates)
@@ -251,7 +251,7 @@ def speculative_generate(
         )  # b 1 1+h
 
         # Set global values to those of best guess
-        next_vals = (next_vals.gather(1, best_guess_unflat).squeeze(1))  # b 1+h
+        next_vals = next_vals.gather(1, best_guess_unflat).squeeze(1)  # b 1+h
         n_correct = n_correct.gather(1, best_guess.unsqueeze(1)).squeeze(1)  # b
         embeds = embeds.gather(
             1, best_guess_unflat.unsqueeze(3).expand(-1, -1, -1, embeds.size(2))
