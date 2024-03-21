@@ -44,10 +44,14 @@ def speculative_generate(
             the paged kv-cache manager to be used in generation
         max_seq_len: the sequence length of the base model
         new_tokens: number of tokens to generate
-        n_candidates: only score the top k candidates from the speculator
-        threshes: use top k predictions from each head to generate speculator candidate pool
-        verbose_dict: Optional HF tokenizer vocab dict. If provided, runs verbosely and prints
-            speculator behavior and scoring for each step
+        n_candidates: only consider the top n most confident candidates from the speculator
+        threshes: build candidate suffix trees by taking top-(threshes[n]) most confident values
+            for head n. len(threshes) must equal speculator.n_predict. prod(threshes) must be greater
+            than or equal to n_candidates (we cannot have more candidates than tree leaves). 
+        flatting: enable batch flattening / tree attention with redundant prefix removal when compression
+            ratio is favorable. Adds extra overhead to shrink the token count in each batch.
+        decode_model: TODO
+        cudagraphs: TODO
     Returns:
         result: List of id tensors, possibly different lengths if batching.
         n_steps: Number of foward passes used to generate provided tokens.
