@@ -243,7 +243,7 @@ def speculative_generate(
             )  # b k 1+h d
 
         # Check correctness of speculator predictions
-        test = input_ids_unflat[:, :-1].eq(next_vals[:, 1:]).cumprod(1)
+        test = input_ids_unflat[:, :, :-1].eq(next_vals[:, :, 1:]).cumprod(1)
         n_correct = test.sum(1).view(bsize, n_candidates)
         best_guess = n_correct.argmax(1)  # b
         best_guess_unflat = (
