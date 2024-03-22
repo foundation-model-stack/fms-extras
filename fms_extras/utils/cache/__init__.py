@@ -7,7 +7,7 @@ import torch
 
 def compute_position_ids(
     num_tokens_per_sequence: List[int], context_lengths: Optional[List[int]] = None
-) -> List[List[int]]:
+) -> torch.Tensor:
     """Compute position ids based on the current context lengths and the new tokens to add
 
     Parameters
@@ -20,7 +20,7 @@ def compute_position_ids(
 
     Returns
     -------
-    List[List[int]]
+    torch.Tensor
         the position ids for each sequence
     """
 
@@ -31,11 +31,15 @@ def compute_position_ids(
             start = 0
         else:
             start = context_lengths[seq_i] - 1
-        position_ids_i = [0 for _ in range(max_tokens - num_tokens)] + [
-            i for i in range(start, start + num_tokens)
-        ]
+
+        position_ids_i = torch.cat(
+            (
+                torch.zeros(max_tokens - num_tokens, dtype=torch.int64),
+                torch.arange(start, start + num_tokens),
+            )
+        )
         position_ids.append(position_ids_i)
-    return position_ids
+    return torch.stack(position_ids)
 
 
 class AttentionComputationMixin(metaclass=abc.ABCMeta):
@@ -180,18 +184,21 @@ class CacheDataWithMetadata(CacheData):
     context_lengths: Optional[torch.Tensor]
 
     def compute_position_ids(self, num_tokens_per_sequence: List[int]) -> torch.Tensor:
-        position_ids_list = compute_position_ids(
-            num_tokens_per_sequence,
-            None
-            if self.context_lengths is None
-            else [
-                r - l + 1
-                for l, r in zip(num_tokens_per_sequence, self.context_lengths.tolist())
-            ],
-        )
-        return torch.tensor(
-            position_ids_list, dtype=torch.long, device=self.data[0][0].device
-        )
+        device = self.data[0][0].device
+        max_tokens = max(num_tokens_per_sequence)
+        position_ids = []
+        for seq_i, num_tokens in enumerate(num_tokens_per_sequence):
+            start = (
+                0
+                if self.context_lengths is None
+                else self.context_lengths[seq_i].item() - num_tokens
+            )
+            pads = torch.zeros(max_tokens - num_tokens, dtype=torch.long, device=device)
+            positions = torch.arange(
+                start, start + num_tokens, dtype=torch.long, device=device
+            )
+            position_ids.append(torch.cat((pads, positions)))
+        return torch.stack(position_ids)
 
 
 class KVCacheManager(metaclass=abc.ABCMeta):
