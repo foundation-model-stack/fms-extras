@@ -47,7 +47,7 @@ def speculative_generate(
         n_candidates: only consider the top n most confident candidates from the speculator
         threshes: build candidate suffix trees by taking top-(threshes[n]) most confident values
             for head n. len(threshes) must equal speculator.n_predict. prod(threshes) must be greater
-            than or equal to n_candidates (we cannot have more candidates than tree leaves). 
+            than or equal to n_candidates (we cannot have more candidates than tree leaves).
         flatting: enable batch flattening / tree attention with redundant prefix removal when compression
             ratio is favorable. Adds extra overhead to shrink the token count in each batch.
         decode_model: TODO
