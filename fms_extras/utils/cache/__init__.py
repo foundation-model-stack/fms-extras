@@ -5,16 +5,6 @@ from typing import List, Optional, Tuple
 import torch
 
 
-class AttentionComputationMixin(metaclass=abc.ABCMeta):
-    """
-    Include this mixin in a class to implement a custom version of attention
-    """
-
-    @abc.abstractmethod
-    def attend(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor):
-        pass
-
-
 @dataclasses.dataclass
 class CacheDataLayer(metaclass=abc.ABCMeta):
     """
