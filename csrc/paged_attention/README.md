@@ -1,0 +1,1 @@
+Note: Current version of paged attention kernels adapted from https://github.com/vllm-project/vllm 0.2.7
