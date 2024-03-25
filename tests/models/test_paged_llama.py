@@ -1,12 +1,11 @@
 import re
 import tempfile
 
+import pytest
 import torch
 from fms.models import get_model
 from fms.testing.comparison import get_signature
 from fms.utils import serialization
-
-from fms_extras.models import paged_llama
 
 
 def __rename_weights_to_paged(orig_sd):
@@ -40,8 +39,14 @@ def __rename_weights_to_paged(orig_sd):
 serialization.register_adapter("paged_llama", "fms_llama", __rename_weights_to_paged)
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="must have cuda to run paged llama equivalency test",
+)
 def test_llama_and_paged_llama_equivalency():
-    llama = get_model("llama", "micro")
+    from fms_extras.models import paged_llama
+
+    llama = get_model("llama", "micro").to("cuda")
 
     with tempfile.TemporaryDirectory() as workdir:
         sd_path = f"{workdir}/model.pth"
@@ -49,8 +54,8 @@ def test_llama_and_paged_llama_equivalency():
 
         paged_llama = get_model(
             "paged_llama", "micro", model_path=sd_path, source="fms_llama"
-        )
+        ).to("cuda")
 
-    llama_signature = torch.tensor(get_signature(llama))
-    paged_llama_signature = torch.tensor(get_signature(paged_llama))
+    llama_signature = torch.tensor(get_signature(llama, device="cuda"))
+    paged_llama_signature = torch.tensor(get_signature(paged_llama, device="cuda"))
     torch.testing.assert_close(llama_signature, paged_llama_signature)
