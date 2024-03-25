@@ -828,5 +828,36 @@ def _hf_sd_to_fms_sd(hf_sd: Mapping) -> Mapping:
     return new_sd
 
 
+def _rename_fms_weights_to_fms_paged(orig_sd):
+    new_sd = {}
+    for name, param in orig_sd.items():
+        new_name = f"headless_model.{name}"
+        new_sd[new_name] = param
+
+        # llama in meta has unfused qkv attn weights, so these weights must be converted to fused weights in fms
+        if (
+            "attn.query" in new_name
+            or "attn.key" in new_name
+            or "attn.value" in new_name
+        ):
+            unfused_weights = [
+                re.sub(r"attn.(query|key|value)", "attn.query", name),
+                re.sub(r"attn.(query|key|value)", "attn.key", name),
+                re.sub(r"attn.(query|key|value)", "attn.value", name),
+            ]
+            missing_weights = [w for w in unfused_weights if w not in orig_sd.keys()]
+            if len(missing_weights) != 0:
+                raise serialization.FusableWeightsMissingError(missing_weights)
+
+            new_sd[
+                re.sub(r"attn.(query|key|value)", "attn.qkv_fused", new_name)
+            ] = torch.cat([orig_sd[w] for w in unfused_weights], dim=0)
+
+    return new_sd
+
+
 serialization.register_adapter(_architecture_name, "meta", _rename_weights_to_fms)
 serialization.register_adapter(_architecture_name, "hf", _hf_sd_to_fms_sd)
+serialization.register_adapter(
+    _architecture_name, "fms_llama", _rename_fms_weights_to_fms_paged
+)

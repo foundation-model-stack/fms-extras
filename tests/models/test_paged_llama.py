@@ -4,39 +4,6 @@ import tempfile
 import pytest
 import torch
 from fms.models import get_model
-from fms.testing.comparison import get_signature
-from fms.utils import serialization
-
-
-def __rename_weights_to_paged(orig_sd):
-    new_sd = {}
-    for name, param in orig_sd.items():
-        new_name = f"headless_model.{name}"
-        new_sd[new_name] = param
-
-        # llama in meta has unfused qkv attn weights, so these weights must be converted to fused weights in fms
-        if (
-            "attn.query" in new_name
-            or "attn.key" in new_name
-            or "attn.value" in new_name
-        ):
-            unfused_weights = [
-                re.sub(r"attn.(query|key|value)", "attn.query", name),
-                re.sub(r"attn.(query|key|value)", "attn.key", name),
-                re.sub(r"attn.(query|key|value)", "attn.value", name),
-            ]
-            missing_weights = [w for w in unfused_weights if w not in orig_sd.keys()]
-            if len(missing_weights) != 0:
-                raise serialization.FusableWeightsMissingError(missing_weights)
-
-            new_sd[
-                re.sub(r"attn.(query|key|value)", "attn.qkv_fused", new_name)
-            ] = torch.cat([orig_sd[w] for w in unfused_weights], dim=0)
-
-    return new_sd
-
-
-serialization.register_adapter("paged_llama", "fms_llama", __rename_weights_to_paged)
 
 
 @pytest.mark.skipif(
@@ -45,17 +12,59 @@ serialization.register_adapter("paged_llama", "fms_llama", __rename_weights_to_p
 )
 def test_llama_and_paged_llama_equivalency():
     from fms_extras.models import paged_llama
+    from fms_extras.utils.cache.paged import PagedKVCacheManager
 
-    llama = get_model("llama", "micro").to("cuda")
+    # note: changed micro to have nheads=2 to increase head size for paged attention kernels
+    llama = get_model("llama", "micro", device_type="cuda", nheads=2)
 
     with tempfile.TemporaryDirectory() as workdir:
         sd_path = f"{workdir}/model.pth"
         torch.save(llama.state_dict(), sd_path)
 
         paged_llama = get_model(
-            "paged_llama", "micro", model_path=sd_path, source="fms_llama"
-        ).to("cuda")
+            "paged_llama",
+            "micro",
+            model_path=sd_path,
+            source="fms_llama",
+            device_type="cuda",
+            nheads=2,
+        )
+    torch.set_grad_enabled(False)
+    llama.eval()
+    paged_llama.eval()
 
-    llama_signature = torch.tensor(get_signature(llama, device="cuda"))
-    paged_llama_signature = torch.tensor(get_signature(paged_llama, device="cuda"))
-    torch.testing.assert_close(llama_signature, paged_llama_signature)
+    kv_cache_manager = PagedKVCacheManager(
+        paged_llama.config.nlayers,
+        paged_llama.config.nheads,
+        paged_llama.config.emb_dim,
+        kv_heads=paged_llama.config.kvheads,
+        dtype=torch.get_default_dtype(),
+    )
+    input_ids = torch.arange(0, 16, device="cuda").unsqueeze(0)
+    cache_data = kv_cache_manager.allocate_tokens([input_ids.size(1)])
+    position_ids = cache_data.compute_position_ids([input_ids.size(1)])
+
+    prefill_llama, prefill_cache = llama.forward(
+        input_ids, position_ids=position_ids, use_cache=True
+    )
+    prefill_paged_llama, _ = paged_llama.forward(
+        input_ids, position_ids=position_ids, use_cache=True, cache_data=cache_data
+    )
+
+    torch.testing.assert_close(prefill_llama, prefill_paged_llama)
+
+    input_ids = torch.argmax(prefill_llama[:, -1, :], dim=-1).unsqueeze(0).t()
+    cache_data = kv_cache_manager.allocate_tokens([1], cache_data.sequence_ids)
+    position_ids = cache_data.compute_position_ids([1])
+
+    decode_llama, _ = llama.forward(
+        input_ids,
+        position_ids=position_ids,
+        use_cache=True,
+        past_key_value_states=prefill_cache,
+    )
+    decode_paged_llama, _ = paged_llama.forward(
+        input_ids, position_ids=position_ids, use_cache=True, cache_data=cache_data
+    )
+
+    torch.testing.assert_close(decode_llama, decode_paged_llama)

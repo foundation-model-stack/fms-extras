@@ -8,9 +8,21 @@ import torch.nn.functional as F
 from fms_extras.utils.cache.paged import PagedKVCacheManager
 
 
+def __right_pad_zeros(input_tensor: torch.Tensor, max_length: int) -> torch.Tensor:
+    return torch.stack(
+        [
+            F.pad(
+                input_tensor[i],
+                (0, max_length - input_tensor.size(1)),
+            )
+            for i in range(input_tensor.size(0))
+        ]
+    )
+
+
 def paged_generate(
     model: Union[Callable, torch.nn.Module],
-    input_ids: torch.Tensor,
+    input_ids_list: List[torch.Tensor],
     kv_cache_manager: PagedKVCacheManager,
     max_seq_len: int = 2048,
     max_new_tokens: int = 256,
@@ -27,6 +39,8 @@ def paged_generate(
     Args:
         model: Callable or nn.Module
             A function or nn.Module that takes a batch of input_ids and returns logits
+        input_ids_list: List[torch.Tensor]
+            A list of tensors, each tensor being for a single prompt
         kv_cache_manager: PagedKVCacheManager
             the paged KVCacheManager that handles management of the kv-cache for paged attention
         max_seq_len: int
@@ -41,15 +55,18 @@ def paged_generate(
             multinomial sampling. False for greedy.
         decode_model: Callable or nn.Module, optional
             a model to used specifically for decode step. If not given, the model input will be used for decode step
+        cudagraphs: bool
+            if True, model is using cudagraphs and input will be padded, otherwise no cudagraphs is used and input is
+            not padded
 
     Returns:
-    Tuple[torch.Tensor, int, int]
+    Tuple[torch.Tensor, int, float]
         the resulting output tokens, the number of new tokens generated, and the time it took per token in seconds
     """
     if decode_model is None:
         decode_model = model
 
-    bsize = len(input_ids)
+    bsize = len(input_ids_list)
 
     if cudagraphs and bsize != 1:
         raise NotImplementedError(
@@ -57,10 +74,10 @@ def paged_generate(
         )
 
     # Build padded batched input tensor
-    max_len = max([seq.size(0) for seq in input_ids])
-    n_pads_init = [max_len - seq.size(0) for seq in input_ids]
+    max_len = max([seq.size(0) for seq in input_ids_list])
+    n_pads_init = [max_len - seq.size(0) for seq in input_ids_list]
     input_ids = torch.stack(
-        [F.pad(input_ids[i], (n_pads_init[i], 0)) for i in range(bsize)]
+        [F.pad(input_ids_list[i], (n_pads_init[i], 0)) for i in range(bsize)]
     )
 
     result = input_ids
@@ -105,17 +122,9 @@ def paged_generate(
         else:
             # cudagraph requires static shapes
             if cudagraphs:
-                block_mapping = kwargs["cache_data"].block_mapping
-                block_mapping = torch.stack(
-                    [
-                        F.pad(
-                            block_mapping[i],
-                            (0, block_mapping_max - block_mapping.size(1)),
-                        )
-                        for i in range(block_mapping.size(0))
-                    ]
+                kwargs["cache_data"].block_mapping = __right_pad_zeros(
+                    kwargs["cache_data"].block_mapping, block_mapping_max
                 )
-                kwargs["cache_data"].block_mapping = block_mapping
 
             logits, _ = decode_model(input_ids, **kwargs)
         logits = logits[:, -1, :]
