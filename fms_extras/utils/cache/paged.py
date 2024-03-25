@@ -11,7 +11,6 @@ from torch._inductor.virtualized import V
 
 from fms_extras.paged_c import attn_ops, cache_ops  # type: ignore
 from fms_extras.utils.cache import (
-    AttentionComputationMixin,
     CacheDataLayer,
     CacheDataWithMetadata,
     KVCache,
@@ -19,6 +18,7 @@ from fms_extras.utils.cache import (
 )
 
 
+# adding paged attention to the torch namespace in order to support torch compile
 lib = torch.library.Library("paged_attention", "FRAGMENT")
 
 lib.define(
@@ -283,7 +283,7 @@ class PagedAttnKernel(ir.FallbackKernel):
 
 
 @dataclasses.dataclass
-class PagedAttentionCacheDataLayer(AttentionComputationMixin, CacheDataLayer):
+class PagedAttentionCacheDataLayer(CacheDataLayer):
     data_layer: Tuple[torch.Tensor, torch.Tensor]
     max_sequence_length: int
     context_lengths: Optional[torch.Tensor]
@@ -318,9 +318,17 @@ class PagedAttentionCacheDataLayer(AttentionComputationMixin, CacheDataLayer):
     def attend(
         self,
         query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
     ) -> torch.Tensor:
+        """Perform paged attention on this layer of the Cache
+
+        Args:
+            query: torch.Tensor
+                the query tensor
+
+        Returns:
+            torch.Tensor
+                the output attention computation
+        """
         query = query.view(-1, self.num_heads, self.head_size)
 
         # Pre-allocate the output tensor.
@@ -336,6 +344,13 @@ class PagedAttentionCacheDataLayer(AttentionComputationMixin, CacheDataLayer):
             max_num_partitions == 1 or num_seqs * num_heads > 512
         )
 
+        # from vLLM (woosuk) - Tune this heuristic
+        # We use a simple heuristic to decide whether to use
+        # PagedAttention V1 or V2. If the number of partitions is 1, we use
+        # V1 to avoid the overhead of reduction. Also, if the number of
+        # sequences or heads is large, we use V1 since there is enough work
+        # to parallelize.
+        # For context len > 8192, use V2 kernel to avoid shared memory shortage.
         if use_v1:
             attn = torch.ops.paged_attention.paged_attention_v1(
                 attn,
