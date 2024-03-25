@@ -10,11 +10,12 @@ from fms.utils import generation, tokenizers
 from torch import distributed as dist
 
 import fms_extras.models.paged_llama
-from fms_extras.utils.generation import paged_generate
+from fms_extras.models.speculator import MLPSpeculator
+from fms_extras.utils.generation import paged_generate, speculative_generate
 
 
 # This example script validates the LLaMA implementation by running inference on a couple of prompts.
-# torchrun --nproc_per_node=1 scripts/inference.py --variant=7b --model_path=~/models/7B-F --tokenizer=~/models/tokenizer.model --model_source=meta --compile
+# torchrun --nproc_per_node=1 scripts/inference.py --variant=7b --model_path=~/models/7B-F --tokenizer=~/models/tokenizer.model --model_source=meta --speculator_path=~/models/speculator_7B_F.pth --compile
 
 parser = argparse.ArgumentParser(
     description="Script to run inference on a causal model"
@@ -30,6 +31,12 @@ parser.add_argument(
     "--model_path",
     type=str,
     help="Path to the directory containing LLaMa weights (.pth files sharded by tensor parallel rank, not HF weights)",
+)
+parser.add_argument(
+    "--speculator_path",
+    type=str,
+    default=None,
+    help="Path to the checkpoint containing speculator weights (single .pth file, not HF weights)",
 )
 parser.add_argument(
     "--model_source",
@@ -131,6 +138,17 @@ decode_model = None
 tokenizer = tokenizers.get_tokenizer(args.tokenizer)
 model.eval()
 torch.set_grad_enabled(False)
+speculator = None
+if args.speculator_path is not None:
+    print("loading speculator")
+    speculator = MLPSpeculator(
+        model.config.emb_dim, 4096, model.config.src_vocab_size, n_predict=3
+    )
+    speculator.load_state_dict(
+        torch.load(args.speculator_path, map_location=device)["model_state"]
+    )
+    speculator = speculator.to(device)
+    print("loading complete on rank", local_rank)
 
 print("initializing paged cache")
 # cache setup
@@ -181,16 +199,30 @@ def infer(ids, warmup):
 
     cudagraphs = compile_mode == "reduce-overhead"
 
-    result, n_steps, generated_token_time_out = paged_generate(
-        model,
-        ids,
-        kv_cache_manager,
-        max_new_tokens=100,
-        max_seq_len=model.config.max_expected_seq_len,
-        do_sample=False,
-        decode_model=decode_model,
-        cudagraphs=cudagraphs,
-    )
+    if speculator:
+        result, n_steps, generated_token_time_out = speculative_generate(
+            model,
+            ids,
+            speculator,
+            kv_cache_manager,
+            new_tokens=100,
+            max_seq_len=model.config.max_expected_seq_len,
+            decode_model=decode_model,
+            # todo: we can only reduce-overhead for now when batch size is 1
+            flatting=not (args.compile and compile_mode == "reduce-overhead"),
+            cudagraphs=cudagraphs,
+        )
+    else:
+        result, n_steps, generated_token_time_out = paged_generate(
+            model,
+            ids,
+            kv_cache_manager,
+            max_new_tokens=100,
+            max_seq_len=model.config.max_expected_seq_len,
+            do_sample=False,
+            decode_model=decode_model,
+            cudagraphs=cudagraphs,
+        )
     if not warmup:
         total_tokens = 0
         for i in range(len(result)):
@@ -208,6 +240,11 @@ if args.compile:
     decode_model = model
     decode_model = torch.compile(decode_model, mode=compile_mode, fullgraph=True)
     model = torch.compile(model, fullgraph=True, dynamic=True)
+    if speculator:
+        speculator = torch.compile(speculator, mode=compile_mode)
+        speculator.generate_suffixes = torch.compile(
+            speculator.generate_suffixes, mode=compile_mode
+        )
 
 template = "Below is an instruction that describes a task. Write a response that appropriately completes the request.\n\n### Instruction:\n{}\n\n### Response:"
 
