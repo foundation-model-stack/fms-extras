@@ -191,7 +191,7 @@ class PagedMultiHeadAttention(nn.Module):
             keys, values = cache_data_layer.store(keys, values)
 
         if use_cache and cache_data_layer and cache_data_layer.is_filled():
-            attn = cache_data_layer.attend(queries, keys, values)
+            attn = cache_data_layer.attend(queries)
         # otherwise we always fall back into SDPA as this is either a prompt or it is a single contiguous cache
         else:
             queries = queries.transpose(2, 1)
