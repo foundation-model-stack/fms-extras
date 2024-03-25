@@ -10,12 +10,7 @@ from torch._dynamo import mark_static_address
 from torch._inductor.virtualized import V
 
 from fms_extras.paged_c import attn_ops, cache_ops  # type: ignore
-from fms_extras.utils.cache import (
-    CacheDataLayer,
-    CacheDataWithMetadata,
-    KVCache,
-    KVCacheManager,
-)
+from fms_extras.utils.cache import CacheDataLayer, CacheDataWithMetadata, KVCache
 
 
 # adding paged attention to the torch namespace in order to support torch compile
@@ -723,10 +718,9 @@ class CacheBlockGroup(List[CacheBlock]):
         return [cb.block_number for cb in self]
 
 
-class PagedKVCacheManager(KVCacheManager):
+class PagedKVCacheManager:
     """
-    PagedKVCacheManager is a specific form of KVCacheManager that is used for management of the kv-cache when using the
-    Paged Attention kernels.
+    PagedKVCacheManager is used for management of the kv-cache when using the Paged Attention kernels.
 
     This class is responsible for:
 
@@ -872,6 +866,17 @@ class PagedKVCacheManager(KVCacheManager):
         del self.cbg_map[sequence_id]
 
     def free_sequences(self, sequence_ids: List[int], recursive: bool = False):
+        """
+        free the given sequence ids from the kv-cache
+
+        Parameters
+        ----------
+        sequence_ids: List[int]
+            list of sequence ids to free
+        recursive: bool
+            if True, will free all sequences this sequence is referencing, directly or indirectly, otherwise will only
+            free this sequence alone.
+        """
         for seq_id in sequence_ids:
             prefix_cbg = self.cbg_map[seq_id].prefix if recursive else None
             self.free(seq_id)
@@ -957,6 +962,27 @@ class PagedKVCacheManager(KVCacheManager):
         num_tokens_per_sequence: List[int],
         sequence_ids: Optional[List[int]] = None,
     ) -> PagedAttentionCacheData:
+        """
+        allocate tokens in the kv-cache. If sequence ids are not given, this will be considered pre-fill for the prompt,
+        and sequence ids will be generated. If sequence ids are given, this will be considered allocating tokens for
+        generation and paged attention will be used
+
+        Parameters
+        ----------
+        num_tokens_per_sequence: List[int]
+            the number of tokens per sequence to expand in the kv-cache. This should correspond index-to-index with the
+            given sequence_ids
+        sequence_ids: List[int], optional
+            a list of sequence ids that will be expanded in the cache with generated tokens. If no sequence ids are
+            given, a new sequence id will be generated and allocation will be considered for the prompt
+            (default is None)
+
+        Returns
+        -------
+        PagedAttentionCacheData
+            a cache data object that includes metadata associated with it based on the current state of the
+            PagedKVCacheManager for the given sequence ids.
+        """
         if sequence_ids is None:
             return self._allocate_prompt_tokens(num_tokens_per_sequence)
         else:
