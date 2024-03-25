@@ -39,6 +39,7 @@ def test_llama_and_paged_llama_equivalency():
         paged_llama.config.emb_dim,
         kv_heads=paged_llama.config.kvheads,
         dtype=torch.get_default_dtype(),
+        total_num_gpu_blocks=100,
     )
     input_ids = torch.arange(0, 16, device="cuda").unsqueeze(0)
     cache_data = kv_cache_manager.allocate_tokens([input_ids.size(1)])

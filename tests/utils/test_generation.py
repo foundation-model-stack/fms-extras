@@ -40,6 +40,7 @@ def test_paged_generate():
         paged_llama.config.emb_dim,
         kv_heads=paged_llama.config.kvheads,
         dtype=torch.get_default_dtype(),
+        total_num_gpu_blocks=100,
     )
 
     input_ids = torch.tensor(
