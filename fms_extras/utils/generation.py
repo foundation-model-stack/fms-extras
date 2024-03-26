@@ -20,6 +20,21 @@ def __right_pad_zeros(input_tensor: torch.Tensor, max_length: int) -> torch.Tens
     )
 
 
+def __create_prefill_mask(
+    num_tokens_per_sequence: List[int], device: Union[str, torch.device]
+) -> torch.Tensor:
+    max_tokens = max(num_tokens_per_sequence)
+
+    is_pad_list = []
+    for num_tokens in num_tokens_per_sequence:
+        pads = torch.zeros(max_tokens - num_tokens, dtype=torch.bool, device=device)
+        non_pads = torch.ones(num_tokens, dtype=torch.bool, device=device)
+        is_pad_list.append(torch.cat((pads, non_pads)))
+    is_pad = torch.stack(is_pad_list)
+    mask = is_pad.unsqueeze(-1) == is_pad.unsqueeze(-2)
+    return mask.tril(diagonal=0)
+
+
 def paged_generate(
     model: Union[Callable, torch.nn.Module],
     input_ids_list: List[torch.Tensor],
@@ -62,7 +77,7 @@ def paged_generate(
     Returns:
     Tuple[torch.Tensor, int, float, float]
         the resulting output tokens, the number of new tokens generated, the time to first token in seconds and the
-        total decode time
+        cumulative time of all decode steps in seconds
     """
     start_time = time.time()
     if decode_model is None:
@@ -77,9 +92,12 @@ def paged_generate(
 
     # Build padded batched input tensor
     max_len = max([seq.size(0) for seq in input_ids_list])
-    n_pads_init = [max_len - seq.size(0) for seq in input_ids_list]
+    num_tokens_per_sequence = [seq.size(0) for seq in input_ids_list]
     input_ids = torch.stack(
-        [F.pad(input_ids_list[i], (n_pads_init[i], 0)) for i in range(bsize)]
+        [
+            F.pad(input_ids_list[i], (max_len - num_tokens_per_sequence[i], 0))
+            for i in range(bsize)
+        ]
     )
 
     result = input_ids
@@ -97,16 +115,11 @@ def paged_generate(
 
         # compute the mask
         if i == 0:
-            is_pad = input_ids == 0
-            mask = is_pad.unsqueeze(-1) == is_pad.unsqueeze(-2)
-            kwargs["mask"] = mask.tril(diagonal=0)
+            kwargs["mask"] = __create_prefill_mask(
+                num_tokens_per_sequence, device=input_ids.device
+            )
         else:
             kwargs["mask"] = None
-
-        # get the cache data and position ids if using cache
-        if sequence_ids is None:
-            num_tokens_per_sequence = torch.count_nonzero(input_ids.T, dim=0).tolist()
-        else:
             num_tokens_per_sequence = [1 for _ in range(input_ids.size(0))]
 
         cache_data = kv_cache_manager.allocate_tokens(
