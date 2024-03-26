@@ -296,14 +296,14 @@ def __right_pad_zeros(input_tensor: torch.Tensor, max_length: int) -> torch.Tens
 
 
 def __create_prefill_mask(
-    num_tokens_per_sequence: List[int], device: Union[str, torch.device]
+    model_input_lengths: List[int], device: Union[str, torch.device]
 ) -> torch.Tensor:
-    max_tokens = max(num_tokens_per_sequence)
+    max_tokens = max(model_input_lengths)
 
     is_pad_list = []
-    for num_tokens in num_tokens_per_sequence:
-        pads = torch.zeros(max_tokens - num_tokens, dtype=torch.bool, device=device)
-        non_pads = torch.ones(num_tokens, dtype=torch.bool, device=device)
+    for seq_len in model_input_lengths:
+        pads = torch.zeros(max_tokens - seq_len, dtype=torch.bool, device=device)
+        non_pads = torch.ones(seq_len, dtype=torch.bool, device=device)
         is_pad_list.append(torch.cat((pads, non_pads)))
     is_pad = torch.stack(is_pad_list)
     mask = is_pad.unsqueeze(-1) == is_pad.unsqueeze(-2)
@@ -359,7 +359,6 @@ def paged_generate(
         decode_model = model
 
     bsize = len(input_ids_list)
-    prefill = True
 
     if cudagraphs and bsize != 1:
         raise NotImplementedError(
