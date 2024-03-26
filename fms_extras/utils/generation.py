@@ -1,6 +1,6 @@
 import functools
 import time
-from typing import Any, Callable, List, MutableMapping, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, MutableMapping, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -319,6 +319,21 @@ def __right_pad_zeros(input_tensor: torch.Tensor, max_length: int) -> torch.Tens
     )
 
 
+def __create_prefill_mask(
+    num_tokens_per_sequence: List[int], device: Union[str, torch.device]
+) -> torch.Tensor:
+    max_tokens = max(num_tokens_per_sequence)
+
+    is_pad_list = []
+    for num_tokens in num_tokens_per_sequence:
+        pads = torch.zeros(max_tokens - num_tokens, dtype=torch.bool, device=device)
+        non_pads = torch.ones(num_tokens, dtype=torch.bool, device=device)
+        is_pad_list.append(torch.cat((pads, non_pads)))
+    is_pad = torch.stack(is_pad_list)
+    mask = is_pad.unsqueeze(-1) == is_pad.unsqueeze(-2)
+    return mask.tril(diagonal=0)
+
+
 def paged_generate(
     model: Union[Callable, torch.nn.Module],
     input_ids_list: List[torch.Tensor],
@@ -361,13 +376,14 @@ def paged_generate(
     Returns:
     Tuple[torch.Tensor, int, float, float]
         the resulting output tokens, the number of new tokens generated, the time to first token in seconds and the
-        total decode time
+        cumulative time of all decode steps in seconds
     """
     start_time = time.time()
     if decode_model is None:
         decode_model = model
 
     bsize = len(input_ids_list)
+    prefill = True
 
     if cudagraphs and bsize != 1:
         raise NotImplementedError(
@@ -376,9 +392,12 @@ def paged_generate(
 
     # Build padded batched input tensor
     max_len = max([seq.size(0) for seq in input_ids_list])
-    n_pads_init = [max_len - seq.size(0) for seq in input_ids_list]
+    model_input_lengths = [seq.size(0) for seq in input_ids_list]
     input_ids = torch.stack(
-        [F.pad(input_ids_list[i], (n_pads_init[i], 0)) for i in range(bsize)]
+        [
+            F.pad(input_ids_list[i], (max_len - model_input_lengths[i], 0))
+            for i in range(bsize)
+        ]
     )
 
     result = input_ids
@@ -386,37 +405,20 @@ def paged_generate(
     kwargs: MutableMapping[str, Any] = dict()
     kwargs["cache_data"] = None
     kwargs["use_cache"] = True
+    kwargs["mask"] = __create_prefill_mask(model_input_lengths, device=input_ids.device)
     sequence_ids: Optional[List[int]] = None
     block_mapping_max = ((max_len + max_new_tokens) // 16) + 1
     for i in range(max_new_tokens):
         if i == 1:
             start_time = time.time()
+            kwargs["mask"] = None
+            sequence_ids = kwargs["cache_data"].sequence_ids
+            model_input_lengths = [1 for _ in range(bsize)]
 
         input_ids = next_input[:, -max_seq_len:]
 
-        # compute the mask
-        if i == 0:
-            is_pad = input_ids == 0
-            mask = is_pad.unsqueeze(-1) == is_pad.unsqueeze(-2)
-            kwargs["mask"] = mask.tril(diagonal=0)
-        else:
-            kwargs["mask"] = None
-
-        # get the cache data and position ids if using cache
-        if sequence_ids is None:
-            num_tokens_per_sequence = torch.count_nonzero(input_ids.T, dim=0).tolist()
-        else:
-            num_tokens_per_sequence = [1 for _ in range(input_ids.size(0))]
-
-        cache_data = kv_cache_manager.allocate_tokens(
-            num_tokens_per_sequence, sequence_ids
-        )
-
-        sequence_ids = cache_data.sequence_ids
-
-        kwargs["cache_data"] = cache_data
-        kwargs["position_ids"] = cache_data.compute_position_ids(
-            num_tokens_per_sequence
+        kwargs["cache_data"] = kv_cache_manager.allocate_tokens(
+            model_input_lengths, sequence_ids
         )
 
         if i == 0:

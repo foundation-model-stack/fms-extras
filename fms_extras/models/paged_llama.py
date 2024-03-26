@@ -125,7 +125,6 @@ class PagedMultiHeadAttention(nn.Module):
         k: torch.Tensor,
         v: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.Tensor] = None,
         attn_algorithm: Optional[str] = None,
         cache_data_layer: Optional[PagedAttentionCacheDataLayer] = None,
         use_cache: bool = False,
@@ -135,8 +134,6 @@ class PagedMultiHeadAttention(nn.Module):
         """
         cache_data_layer: PagedAttentionCacheDataLayer, optional
             A single layer of the cache (default is None)
-        position_ids: Optional[torch.Tensor]
-            The position of each of the tokens encoded in q and k. Used for RoPE embeddings
         use_cache: bool
             if True, the kv states for self/cross attention will be saved, otherwise they will not be saved
         is_self: bool
@@ -154,6 +151,9 @@ class PagedMultiHeadAttention(nn.Module):
         # q, k, v: batch_size x seq_len x emb_dim
         # mask: batch_size x seq_len x seq_len
         batch_size, q_len, _ = q.size()
+        position_ids = (
+            None if cache_data_layer is None else cache_data_layer.position_ids
+        )
 
         queries, keys, values = self.qkv_fused(q).split(self.splits, dim=-1)
 
@@ -319,7 +319,6 @@ class TPPagedMultiHeadAttention(PagedMultiHeadAttention, TPModule):
         k: torch.Tensor,
         v: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.Tensor] = None,
         attn_algorithm: Optional[str] = None,
         cache_data_layer: Optional[PagedAttentionCacheDataLayer] = None,
         use_cache: bool = False,
@@ -340,7 +339,6 @@ class TPPagedMultiHeadAttention(PagedMultiHeadAttention, TPModule):
             k_par,
             v_par,
             mask,
-            position_ids,
             attn_algorithm,
             cache_data_layer,
             use_cache,
@@ -415,7 +413,6 @@ class PagedLLaMABlock(nn.Module):
         x: torch.Tensor,
         *,
         mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.Tensor] = None,
         cache_data_layer: Optional[PagedAttentionCacheDataLayer] = None,
         use_cache: bool = False,
         is_causal_mask: bool = False,
@@ -429,7 +426,6 @@ class PagedLLaMABlock(nn.Module):
             k=x,
             v=x,
             mask=mask,
-            position_ids=position_ids,
             attn_algorithm=attn_algorithm,
             cache_data_layer=cache_data_layer,
             use_cache=use_cache,
@@ -518,7 +514,6 @@ class PagedLLaMAHeadless(nn.Module):
         self,
         x_in: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.Tensor] = None,
         cache_data: Optional[PagedAttentionCacheData] = None,
         use_cache: bool = False,
         attn_algorithm: Optional[str] = None,
@@ -550,7 +545,6 @@ class PagedLLaMAHeadless(nn.Module):
             output = layer(
                 x=x_in,
                 mask=mask,
-                position_ids=position_ids,
                 cache_data_layer=None
                 if cache_data is None
                 else cache_data.get_layer(i),
@@ -615,7 +609,6 @@ class PagedLLaMA(nn.Module):
         self,
         x: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.Tensor] = None,
         cache_data: Optional[PagedAttentionCacheData] = None,
         use_cache: bool = False,
         only_last_token: bool = False,
@@ -634,9 +627,6 @@ class PagedLLaMA(nn.Module):
                 the input ids as a long type
             mask: torch.Tensor, optional
                 an optional mask to be used in SDPA. If None, no mask will be used
-            position_ids: torch.Tensor, optional
-                the optional position ids to be used with rotary embeddings. If None, will just be positions ids
-                starting at position 0 for each sequence in the batch
             cache_data: PagedAttentionCacheData, optional
                 the optional cache data used in paged attention. If None is given, SDPA will always be used
             use_cache: bool
@@ -658,7 +648,6 @@ class PagedLLaMA(nn.Module):
         embeds, cache = self.headless_model(
             x,
             mask,
-            position_ids,
             cache_data,
             use_cache,
             attn_algorithm,

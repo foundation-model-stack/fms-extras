@@ -43,29 +43,27 @@ def test_llama_and_paged_llama_equivalency():
     )
     input_ids = torch.arange(0, 16, device="cuda").unsqueeze(0)
     cache_data = kv_cache_manager.allocate_tokens([input_ids.size(1)])
-    position_ids = cache_data.compute_position_ids([input_ids.size(1)])
 
     prefill_llama, prefill_cache = llama.forward(
-        input_ids, position_ids=position_ids, use_cache=True
+        input_ids, position_ids=cache_data.position_ids, use_cache=True
     )
     prefill_paged_llama, _ = paged_llama.forward(
-        input_ids, position_ids=position_ids, use_cache=True, cache_data=cache_data
+        input_ids, use_cache=True, cache_data=cache_data
     )
 
     torch.testing.assert_close(prefill_llama, prefill_paged_llama)
 
     input_ids = torch.argmax(prefill_llama[:, -1, :], dim=-1).unsqueeze(0).t()
     cache_data = kv_cache_manager.allocate_tokens([1], cache_data.sequence_ids)
-    position_ids = cache_data.compute_position_ids([1])
 
     decode_llama, _ = llama.forward(
         input_ids,
-        position_ids=position_ids,
+        position_ids=cache_data.position_ids,
         use_cache=True,
         past_key_value_states=prefill_cache,
     )
     decode_paged_llama, _ = paged_llama.forward(
-        input_ids, position_ids=position_ids, use_cache=True, cache_data=cache_data
+        input_ids, use_cache=True, cache_data=cache_data
     )
 
     torch.testing.assert_close(decode_llama, decode_paged_llama)
