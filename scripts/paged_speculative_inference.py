@@ -181,7 +181,7 @@ def infer(ids, warmup):
 
     cudagraphs = compile_mode == "reduce-overhead"
 
-    result, n_steps, generated_token_time_out = paged_generate(
+    result, n_steps, ttft, generated_token_time_out = paged_generate(
         model,
         ids,
         kv_cache_manager,
@@ -197,7 +197,8 @@ def infer(ids, warmup):
             print_result(result[i], ids[i], n_steps)
             total_tokens += len(result[i]) - len(ids[i])
         avg_tokens = total_tokens / len(result)
-        print(f"time per token: {generated_token_time_out / avg_tokens}")
+        print(f"time to first token: {ttft}")
+        print(f"time per token (decode): {generated_token_time_out / avg_tokens}")
 
 
 if args.compile:

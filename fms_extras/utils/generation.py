@@ -1,6 +1,6 @@
 import functools
 import time
-from typing import Any, Callable, List, MutableMapping, Optional, Union
+from typing import Any, Callable, List, MutableMapping, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -32,7 +32,7 @@ def paged_generate(
     decode_model: Optional[Union[Callable, torch.nn.Module]] = None,
     # todo: This is a WIP to enable cudagraphs, currently its only for batch_size=1
     cudagraphs: bool = False,
-):
+) -> Tuple[torch.Tensor, int, float, float]:
     """
     A trivial generate function that can be used for validation/testing generation using paged attention
 
@@ -60,9 +60,11 @@ def paged_generate(
             not padded
 
     Returns:
-    Tuple[torch.Tensor, int, float]
-        the resulting output tokens, the number of new tokens generated, and the time it took per token in seconds
+    Tuple[torch.Tensor, int, float, float]
+        the resulting output tokens, the number of new tokens generated, the time to first token in seconds and the
+        total decode time
     """
+    start_time = time.time()
     if decode_model is None:
         decode_model = model
 
@@ -88,6 +90,9 @@ def paged_generate(
     sequence_ids: Optional[List[int]] = None
     block_mapping_max = ((max_len + max_new_tokens) // 16) + 1
     for i in range(max_new_tokens):
+        if i == 1:
+            start_time = time.time()
+
         input_ids = next_input[:, -max_seq_len:]
 
         # compute the mask
@@ -96,8 +101,6 @@ def paged_generate(
             mask = is_pad.unsqueeze(-1) == is_pad.unsqueeze(-2)
             kwargs["mask"] = mask.tril(diagonal=0)
         else:
-            if i == 1:
-                start_time = time.time()
             kwargs["mask"] = None
 
         # get the cache data and position ids if using cache
@@ -145,6 +148,8 @@ def paged_generate(
 
         next_input = next_val
 
+        if i == 0:
+            ttft = time.time() - start_time
+
     kv_cache_manager.free_sequences(sequence_ids)  # type: ignore
-    end_time = time.time()
-    return result, max_new_tokens, (end_time - start_time)
+    return result, max_new_tokens, ttft, (time.time() - start_time)
