@@ -76,8 +76,8 @@ def paged_generate(
 
     Returns:
     Tuple[torch.Tensor, int, float, float]
-        the resulting output tokens, the number of new tokens generated, the time to first token in seconds and the
-        cumulative time of all decode steps in seconds
+        the resulting output tokens, the number of new tokens generated, the time to first token in seconds, and the
+        cumulative time of all subsequent generation steps (forward pass, kv-cache management, sampling) in seconds
     """
     start_time = time.time()
     if decode_model is None:
@@ -109,12 +109,6 @@ def paged_generate(
     sequence_ids: Optional[List[int]] = None
     block_mapping_max = ((max_len + max_new_tokens) // 16) + 1
     for i in range(max_new_tokens):
-        if i == 1:
-            start_time = time.time()
-            kwargs["mask"] = None
-            sequence_ids = kwargs["cache_data"].sequence_ids
-            model_input_lengths = [1 for _ in range(bsize)]
-
         input_ids = next_input[:, -max_seq_len:]
 
         kwargs["cache_data"] = kv_cache_manager.allocate_tokens(
@@ -151,6 +145,10 @@ def paged_generate(
 
         if i == 0:
             ttft = time.time() - start_time
+            start_time = time.time()
+            kwargs["mask"] = None
+            sequence_ids = kwargs["cache_data"].sequence_ids
+            model_input_lengths = [1 for _ in range(bsize)]
 
     kv_cache_manager.free_sequences(sequence_ids)  # type: ignore
     return result, max_new_tokens, ttft, (time.time() - start_time)
