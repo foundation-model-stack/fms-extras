@@ -11,8 +11,9 @@ from torch._inductor.virtualized import V
 
 from fms_extras.models.speculator import select_inflate_dim
 from fms_extras.paged_c import attn_ops, cache_ops  # type: ignore
-from fms_extras.utils.cache import CacheDataLayer, CacheDataWithMetadata, KVCache
 
+
+KVCache = Tuple[torch.Tensor, torch.Tensor]  # (key cache, value cache)
 
 # adding paged attention to the torch namespace in order to support torch compile
 lib = torch.library.Library("paged_attention", "FRAGMENT")
@@ -279,7 +280,11 @@ class PagedAttnKernel(ir.FallbackKernel):
 
 
 @dataclasses.dataclass
-class PagedAttentionCacheDataLayer(CacheDataLayer):
+class PagedAttentionCacheDataLayer:
+    """
+    Dataclass responsible for storing keys and values in a single layer of cache data
+    """
+
     data_layer: Tuple[torch.Tensor, torch.Tensor]
     max_sequence_length: int
     context_lengths: Optional[torch.Tensor]
@@ -301,6 +306,21 @@ class PagedAttentionCacheDataLayer(CacheDataLayer):
     def store(
         self, keys: torch.Tensor, values: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Store the computed keys and values in the cache data layer
+
+        Parameters
+        ----------
+        key: torch.Tensor
+            the keys to store in this cache layer
+        value: torch.Tensor
+            the values to store in this cache layer
+
+        Returns
+        -------
+        Tuple[torch.Tensor, torch.Tensor]
+            the updated keys and values to be passed in to attention computation
+        """
         # in the case where the indices have been flattened for performance purposes, we must unflatten them to the
         # format expected in the reshape_and_cache function
         if self.unflatten_indices is not None:
@@ -334,13 +354,15 @@ class PagedAttentionCacheDataLayer(CacheDataLayer):
     ) -> torch.Tensor:
         """Perform paged attention on this layer of the Cache
 
-        Args:
-            query: torch.Tensor
-                the query tensor
+        Parameters
+        ----------
+        query: torch.Tensor
+            the query tensor
 
-        Returns:
-            torch.Tensor
-                the output attention computation
+        Returns
+        -------
+        torch.Tensor
+            the output attention computation
         """
         query = query.view(-1, self.num_heads, self.head_size)
 
@@ -412,11 +434,24 @@ class PagedAttentionCacheDataLayer(CacheDataLayer):
         return attn
 
     def is_filled(self) -> bool:
+        """
+        Denotes whether this cache data layer is in post-fill stage
+
+        Returns
+        -------
+        bool
+            True if cache data layer is currently in the post-fill stage, otherwise False and cache data layer is being
+            pre-filled
+        """
         return self.is_generating
 
 
 @dataclasses.dataclass
-class PagedAttentionCacheData(CacheDataWithMetadata):
+class PagedAttentionCacheData:
+    """
+    Dataclass responsible for holding raw cache data
+    """
+
     data: List[Tuple[torch.Tensor, torch.Tensor]]
     max_sequence_length: int
     context_lengths: Optional[torch.Tensor]
@@ -434,6 +469,19 @@ class PagedAttentionCacheData(CacheDataWithMetadata):
     unflatten_indices: Optional[torch.Tensor] = None
 
     def get_layer(self, layer_index: int) -> PagedAttentionCacheDataLayer:
+        """
+        Get a single layer of the cache data
+
+        Parameters
+        ----------
+        layer_index: int
+            index of layer
+
+        Returns
+        -------
+        PagedAttentionCacheDataLayer
+            a single layer of the cache data as a dataclass
+        """
         return PagedAttentionCacheDataLayer(
             data_layer=self.data[layer_index],
             max_sequence_length=self.max_sequence_length,
@@ -452,7 +500,44 @@ class PagedAttentionCacheData(CacheDataWithMetadata):
         )
 
     def is_filled(self) -> bool:
+        """
+        Determines if the cache has been filled with the prompt, or is completely empty for this piece of cache data
+
+        Returns
+        -------
+        bool
+            True if the keys and values for the prompt have been set, otherwise False.
+        """
         return self.is_generating
+
+    def compute_position_ids(self, num_tokens_per_sequence: List[int]) -> torch.Tensor:
+        """Compute position ids based on the current context lengths and the new tokens to add
+
+        Parameters
+        ----------
+        num_tokens_per_sequence: List[int]
+            number of tokens to be added to each sequence
+
+        Returns
+        -------
+        torch.Tensor
+            the position ids for each sequence
+        """
+        device = self.data[0][0].device
+        max_tokens = max(num_tokens_per_sequence)
+        position_ids = []
+        for seq_i, num_tokens in enumerate(num_tokens_per_sequence):
+            start = (
+                0
+                if self.context_lengths is None
+                else self.context_lengths[seq_i].item() - num_tokens
+            )
+            pads = torch.zeros(max_tokens - num_tokens, dtype=torch.long, device=device)
+            positions = torch.arange(
+                start, start + num_tokens, dtype=torch.long, device=device
+            )
+            position_ids.append(torch.cat((pads, positions)))
+        return torch.stack(position_ids)
 
 
 def get_cache_block_size(block_size, head_size, num_heads, num_layers, dtype) -> int:

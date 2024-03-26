@@ -1,11 +1,7 @@
-import json
 import math
-import os
 import re
-from collections import OrderedDict
 from dataclasses import dataclass
-from pathlib import Path
-from typing import List, Mapping, MutableMapping, Optional, Tuple, Union
+from typing import List, Mapping, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -20,7 +16,6 @@ from fms.distributed.tensorparallel import (
     copy_to_tensor_model_parallel_region,
     reduce_from_tensor_model_parallel_region,
 )
-from fms.modules.attention import MultiHeadAttention
 from fms.modules.embedding import WordEmbedding
 from fms.modules.feedforward import GatedLinearUnit
 from fms.modules.layernorm import LayerNormParameterized
@@ -113,23 +108,13 @@ class PagedMultiHeadAttention(nn.Module):
             torch.backends.cuda.mem_efficient_sdp_enabled()
         )
         self.previous_math: bool = torch.backends.cuda.math_sdp_enabled()
-        self.reset_params(gain)
 
-    def reset_params(self, gain=1):
-        # Ensure softmax inputs are standard normal
-        self.qkv_fused.weight.data[
-            : self.emb_kq_per_head * (self.nheads + self.kvheads)
-        ].normal_(0, self.emb_dim**-0.5)
-        # Ensure projection layers have same scale (for normalized-step dataloaders like
-        # AdamW / Sophia), and maintain input norm up to attention remix, in expectation
-        self.qkv_fused.weight.data[
-            self.emb_kq_per_head * (self.nheads + self.kvheads) :
-        ].normal_(
-            0, (gain / (self.emb_dim * self.nheads * self.emb_v_per_head) ** 0.5) ** 0.5
-        )
-        if self.use_bias:
-            for layer in ["qkv_fused", "dense"]:
-                getattr(self, layer).bias.data.zero_()
+    def reset_parameters(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.trunc_normal_(m.weight, mean=0.0, std=0.02)
+                if self.use_bias:
+                    m.bias.data.zero_()
 
     def to_tp(self, group: ProcessGroup) -> "TPPagedMultiHeadAttention":
         return TPPagedMultiHeadAttention.import_module(self, group)
@@ -607,7 +592,6 @@ class PagedLLaMA(nn.Module):
         self.headless_model = PagedLLaMAHeadless(self.config, distributed_strategy)
         # todo: head should be separated from shared for this, but keeping here for now as we would need to add tp
         self.head = self.headless_model.shared
-        self.reset_params()
 
     def get_config(self) -> PagedLLaMAConfig:
         return self.config
@@ -616,12 +600,16 @@ class PagedLLaMA(nn.Module):
     def from_config(cls, config: PagedLLaMAConfig) -> "PagedLLaMA":
         return cls(config)
 
-    def reset_params(self):
-        # Modules are self-initializing, we're just going to down-scale the final prediction head to be
-        # mixed-fan (inputs and gradients scale to the same inverse factors) if it isn't tied
-        self.head.head.weight.data.normal_(
-            0, 1 / math.sqrt(math.sqrt(self.config.emb_dim * self.head.vocab_size))
-        )
+    def reset_parameters(self):
+        # Call reset_parameters for relevant sub-layers
+        for m in self.modules():
+            if (
+                isinstance(m, PagedMultiHeadAttention)
+                or isinstance(m, WordEmbedding)
+                or isinstance(m, GatedLinearUnit)
+                or isinstance(m, LayerNormParameterized)
+            ):
+                m.reset_parameters()
 
     def forward(
         self,
@@ -840,5 +828,36 @@ def _hf_sd_to_fms_sd(hf_sd: Mapping) -> Mapping:
     return new_sd
 
 
+def _rename_fms_weights_to_fms_paged(orig_sd):
+    new_sd = {}
+    for name, param in orig_sd.items():
+        new_name = f"headless_model.{name}"
+        new_sd[new_name] = param
+
+        # llama in meta has unfused qkv attn weights, so these weights must be converted to fused weights in fms
+        if (
+            "attn.query" in new_name
+            or "attn.key" in new_name
+            or "attn.value" in new_name
+        ):
+            unfused_weights = [
+                re.sub(r"attn.(query|key|value)", "attn.query", name),
+                re.sub(r"attn.(query|key|value)", "attn.key", name),
+                re.sub(r"attn.(query|key|value)", "attn.value", name),
+            ]
+            missing_weights = [w for w in unfused_weights if w not in orig_sd.keys()]
+            if len(missing_weights) != 0:
+                raise serialization.FusableWeightsMissingError(missing_weights)
+
+            new_sd[
+                re.sub(r"attn.(query|key|value)", "attn.qkv_fused", new_name)
+            ] = torch.cat([orig_sd[w] for w in unfused_weights], dim=0)
+
+    return new_sd
+
+
 serialization.register_adapter(_architecture_name, "meta", _rename_weights_to_fms)
 serialization.register_adapter(_architecture_name, "hf", _hf_sd_to_fms_sd)
+serialization.register_adapter(
+    _architecture_name, "fms_llama", _rename_fms_weights_to_fms_paged
+)

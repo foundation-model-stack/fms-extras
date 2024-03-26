@@ -1,6 +1,6 @@
 import functools
 import time
-from typing import Any, Callable, List, MutableMapping, Optional, Union
+from typing import Any, Callable, List, MutableMapping, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -56,6 +56,7 @@ def speculative_generate(
         result: List of id tensors, possibly different lengths if batching.
         n_steps: Number of foward passes used to generate provided tokens.
     """
+    start_time = time.time()
     # Construct batch(es) and initial inputs
     if decode_model is None:
         decode_model = model
@@ -122,7 +123,9 @@ def speculative_generate(
     logits, _, embeds = output
     embeds = embeds[:, -1:]  # b 1 d
     logits = logits[:, -1:]  # b 1 v
+    ttft = time.time() - start_time
 
+    start_time = time.time()
     n_gen = torch.zeros(bsize, device=inputs.device, dtype=torch.int)
     n_steps = 0
     input_ids = torch.argmax(logits, dim=2)  # b 1
@@ -131,7 +134,6 @@ def speculative_generate(
         for line, input_id in zip(result, list(input_ids))
     ]
     block_mapping_max = ((max_len + new_tokens) // 16) + 1
-    start_time = time.time()
     while min(n_gen) < new_tokens:
         n_steps += 1
 
@@ -302,13 +304,24 @@ def speculative_generate(
         input_ids = torch.stack([line[-1:] for line in next_vals_split], dim=0)  # b 1
 
     kv_cache_manager.free_sequences(parent_sequence_ids, recursive=True)
-    end_time = time.time()
-    return result, n_steps, (end_time - start_time)
+    return result, n_steps, ttft, (time.time() - start_time)
+
+
+def __right_pad_zeros(input_tensor: torch.Tensor, max_length: int) -> torch.Tensor:
+    return torch.stack(
+        [
+            F.pad(
+                input_tensor[i],
+                (0, max_length - input_tensor.size(1)),
+            )
+            for i in range(input_tensor.size(0))
+        ]
+    )
 
 
 def paged_generate(
     model: Union[Callable, torch.nn.Module],
-    input_ids: torch.Tensor,
+    input_ids_list: List[torch.Tensor],
     kv_cache_manager: PagedKVCacheManager,
     max_seq_len: int = 2048,
     max_new_tokens: int = 256,
@@ -318,13 +331,15 @@ def paged_generate(
     decode_model: Optional[Union[Callable, torch.nn.Module]] = None,
     # todo: This is a WIP to enable cudagraphs, currently its only for batch_size=1
     cudagraphs: bool = False,
-):
+) -> Tuple[torch.Tensor, int, float, float]:
     """
     A trivial generate function that can be used for validation/testing generation using paged attention
 
     Args:
         model: Callable or nn.Module
             A function or nn.Module that takes a batch of input_ids and returns logits
+        input_ids_list: List[torch.Tensor]
+            A list of tensors, each tensor being for a single prompt
         kv_cache_manager: PagedKVCacheManager
             the paged KVCacheManager that handles management of the kv-cache for paged attention
         max_seq_len: int
@@ -339,15 +354,20 @@ def paged_generate(
             multinomial sampling. False for greedy.
         decode_model: Callable or nn.Module, optional
             a model to used specifically for decode step. If not given, the model input will be used for decode step
+        cudagraphs: bool
+            if True, model is using cudagraphs and input will be padded, otherwise no cudagraphs is used and input is
+            not padded
 
     Returns:
-    Tuple[torch.Tensor, int, int]
-        the resulting output tokens, the number of new tokens generated, and the time it took per token in seconds
+    Tuple[torch.Tensor, int, float, float]
+        the resulting output tokens, the number of new tokens generated, the time to first token in seconds and the
+        total decode time
     """
+    start_time = time.time()
     if decode_model is None:
         decode_model = model
 
-    bsize = len(input_ids)
+    bsize = len(input_ids_list)
 
     if cudagraphs and bsize != 1:
         raise NotImplementedError(
@@ -355,10 +375,10 @@ def paged_generate(
         )
 
     # Build padded batched input tensor
-    max_len = max([seq.size(0) for seq in input_ids])
-    n_pads_init = [max_len - seq.size(0) for seq in input_ids]
+    max_len = max([seq.size(0) for seq in input_ids_list])
+    n_pads_init = [max_len - seq.size(0) for seq in input_ids_list]
     input_ids = torch.stack(
-        [F.pad(input_ids[i], (n_pads_init[i], 0)) for i in range(bsize)]
+        [F.pad(input_ids_list[i], (n_pads_init[i], 0)) for i in range(bsize)]
     )
 
     result = input_ids
@@ -369,6 +389,9 @@ def paged_generate(
     sequence_ids: Optional[List[int]] = None
     block_mapping_max = ((max_len + max_new_tokens) // 16) + 1
     for i in range(max_new_tokens):
+        if i == 1:
+            start_time = time.time()
+
         input_ids = next_input[:, -max_seq_len:]
 
         # compute the mask
@@ -377,8 +400,6 @@ def paged_generate(
             mask = is_pad.unsqueeze(-1) == is_pad.unsqueeze(-2)
             kwargs["mask"] = mask.tril(diagonal=0)
         else:
-            if i == 1:
-                start_time = time.time()
             kwargs["mask"] = None
 
         # get the cache data and position ids if using cache
@@ -403,17 +424,9 @@ def paged_generate(
         else:
             # cudagraph requires static shapes
             if cudagraphs:
-                block_mapping = kwargs["cache_data"].block_mapping
-                block_mapping = torch.stack(
-                    [
-                        F.pad(
-                            block_mapping[i],
-                            (0, block_mapping_max - block_mapping.size(1)),
-                        )
-                        for i in range(block_mapping.size(0))
-                    ]
+                kwargs["cache_data"].block_mapping = __right_pad_zeros(
+                    kwargs["cache_data"].block_mapping, block_mapping_max
                 )
-                kwargs["cache_data"].block_mapping = block_mapping
 
             logits, _ = decode_model(input_ids, **kwargs)
         logits = logits[:, -1, :]
@@ -434,6 +447,8 @@ def paged_generate(
 
         next_input = next_val
 
+        if i == 0:
+            ttft = time.time() - start_time
+
     kv_cache_manager.free_sequences(sequence_ids)  # type: ignore
-    end_time = time.time()
-    return result, max_new_tokens, (end_time - start_time)
+    return result, max_new_tokens, ttft, (time.time() - start_time)
