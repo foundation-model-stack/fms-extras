@@ -288,6 +288,7 @@ class PagedAttentionCacheDataLayer:
     max_sequence_length: int
     context_lengths: Optional[torch.Tensor]
     slot_mapping: torch.Tensor
+    position_ids: torch.Tensor
     block_mapping: torch.Tensor
     block_size: int
     scale: float
@@ -437,6 +438,7 @@ class PagedAttentionCacheData:
     data: List[Tuple[torch.Tensor, torch.Tensor]]
     max_sequence_length: int
     context_lengths: Optional[torch.Tensor]
+    position_ids: torch.Tensor
     slot_mapping: torch.Tensor
     block_mapping: torch.Tensor
     block_size: int
@@ -465,6 +467,7 @@ class PagedAttentionCacheData:
             data_layer=self.data[layer_index],
             max_sequence_length=self.max_sequence_length,
             context_lengths=self.context_lengths,
+            position_ids=self.position_ids,
             slot_mapping=self.slot_mapping,
             block_mapping=self.block_mapping,
             block_size=self.block_size,
@@ -485,35 +488,6 @@ class PagedAttentionCacheData:
             True if the keys and values for the prompt have been set, otherwise False.
         """
         return self.is_generating
-
-    def compute_position_ids(self, num_tokens_per_sequence: List[int]) -> torch.Tensor:
-        """Compute position ids based on the current context lengths and the new tokens to add
-
-        Parameters
-        ----------
-        num_tokens_per_sequence: List[int]
-            number of tokens to be added to each sequence
-
-        Returns
-        -------
-        torch.Tensor
-            the position ids for each sequence
-        """
-        device = self.data[0][0].device
-        max_tokens = max(num_tokens_per_sequence)
-        position_ids = []
-        for seq_i, num_tokens in enumerate(num_tokens_per_sequence):
-            start = (
-                0
-                if self.context_lengths is None
-                else self.context_lengths[seq_i].item() - num_tokens
-            )
-            pads = torch.zeros(max_tokens - num_tokens, dtype=torch.long, device=device)
-            positions = torch.arange(
-                start, start + num_tokens, dtype=torch.long, device=device
-            )
-            position_ids.append(torch.cat((pads, positions)))
-        return torch.stack(position_ids)
 
 
 def get_cache_block_size(block_size, head_size, num_heads, num_layers, dtype) -> int:
@@ -986,11 +960,14 @@ class PagedKVCacheManager:
         slot_mapping = []
         block_tables = []
         context_lengths = []
+        position_ids = []
         max_sequence_length = self.get_max_sequence_length(sequence_ids)
         remainder = max_sequence_length % self.block_size
         max_num_blocks = max_sequence_length // self.block_size
         max_num_tokens_per_sequence = (
-            max(num_tokens_per_sequence) if num_tokens_per_sequence else None
+            max(num_tokens_per_sequence)
+            if num_tokens_per_sequence
+            else max_sequence_length
         )
         if remainder != 0:
             max_num_blocks += 1
@@ -1000,6 +977,8 @@ class PagedKVCacheManager:
 
             context_length = cbg.get_sequence_length()
             if is_prompt:
+                num_tokens = context_length
+                start = 0
                 slot = cbg.get_slot_mapping()
                 slot = self.__pad_to_max_left(slot, max_sequence_length, -1)
             else:
@@ -1010,16 +989,27 @@ class PagedKVCacheManager:
                 )
                 i += 1
 
+            pads = torch.zeros(
+                max_num_tokens_per_sequence - num_tokens,
+                dtype=torch.long,
+                device=self.device,
+            )
+            positions = torch.arange(
+                start, start + num_tokens, dtype=torch.long, device=self.device
+            )
+
             block_mapping = cbg.get_block_mapping()
             block_mapping = self.__pad_to_max_right(block_mapping, max_num_blocks, 0)
 
             slot_mapping.append(slot)
+            position_ids.append(torch.cat((pads, positions)))
             block_tables.append(block_mapping)
             context_lengths.append(context_length)
 
         slot_mapping_tensor = torch.tensor(
             slot_mapping, dtype=torch.long, device=self.device
         )
+        position_ids_tensor = torch.stack(position_ids)
         block_tables_tensor = torch.tensor(
             block_tables, dtype=torch.int, device=self.device
         )
@@ -1032,6 +1022,7 @@ class PagedKVCacheManager:
             max_sequence_length=max_sequence_length,
             context_lengths=None if is_prompt else context_lengths_tensor,
             slot_mapping=slot_mapping_tensor,
+            position_ids=position_ids_tensor,
             block_mapping=block_tables_tensor,
             block_size=self.block_size,
             scale=self.head_size**-0.5,
