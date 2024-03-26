@@ -71,54 +71,30 @@ def speculative_generate(
 
     # Build padded batched input tensor
     max_len = max([seq.size(0) for seq in input_ids])
-    n_pads_init = [max_len - seq.size(0) for seq in input_ids]
-    n_pads = torch.tensor(n_pads_init).to(device=input_ids[0].device, dtype=torch.int)
+    model_input_lengths = [seq.size(0) for seq in input_ids]
     inputs = torch.stack(
-        [F.pad(input_ids[i], (n_pads_init[i], 0)) for i in range(bsize)]
+        [
+            F.pad(input_ids[i], (max_len - model_input_lengths[i], 0))
+            for i in range(bsize)
+        ]
     )
-    num_tokens_per_sequence = torch.count_nonzero(inputs.T, dim=0).tolist()
     cache_data: PagedAttentionCacheData = kv_cache_manager.allocate_tokens(
-        num_tokens_per_sequence
+        model_input_lengths
     )
     parent_sequence_ids = cache_data.sequence_ids
 
     # Build padded causal mask
-    mask = torch.ones(
-        bsize,
-        1,
-        inputs.size(1),
-        inputs.size(1),
-        device=inputs.device,
-    )
-    mask = mask.tril()  # b 1 n n
-
-    # Mask off any left-pads
-    pad_mask = torch.arange(mask.size(3), device=mask.device).view(
-        1, 1, 1, -1
-    )  # 1 1 1 n
-    pad_mask = pad_mask.expand(bsize, 1, 1, -1)  # b 1 1 n
-    pad_mask = pad_mask.sub(n_pads.sub(1).view(-1, 1, 1, 1)).clamp(0, 1)
-    eye = torch.eye(mask.size(3), device=mask.device)[None, None, :, :]  # 1 1 n n
-    mask = mask.mul(pad_mask).logical_or(eye).log()  # b 1 n n
-
-    # Handle position_ids
-    pos_ids = torch.arange(mask.size(3), device=inputs.device).repeat(bsize, 1)  # b n
-    pos_ids -= n_pads[:, None]
-
-    kwargs: MutableMapping[str, Any] = dict()
-    kwargs["use_cache"] = True
+    mask = __create_prefill_mask(model_input_lengths, inputs.device)
 
     # Build kv cache and get initial state vector
     inp_len = speculator.n_predict + 1
     inputs = inputs[:, -max_seq_len + inp_len :]
-    position_ids = cache_data.compute_position_ids(num_tokens_per_sequence)
     output = model(
         inputs,
-        position_ids=position_ids,
         mask=mask,
         cache_data=cache_data,
         return_embeds=True,
-        **kwargs
+        use_cache=True,
     )
     logits, _, embeds = output
     embeds = embeds[:, -1:]  # b 1 d
@@ -155,7 +131,6 @@ def speculative_generate(
         cache_data = kv_cache_manager.allocate_tokens(
             num_tokens_per_sequence, child_sequence_ids_flattened
         )
-        position_ids = cache_data.compute_position_ids(num_tokens_per_sequence)
 
         # Get candidate set of speculations
         suffix_ids = speculator.generate_suffixes(
@@ -177,7 +152,9 @@ def speculative_generate(
                 flat_inputs = flat_inputs[None,]  # 1 n'
                 cache_data.unflatten_indices = unflat_indices
                 cache_data.flatten_indices = flat_indices
-                position_ids = select_inflate_dim(position_ids.view(-1), flat_indices)[
+                cache_data.position_ids = select_inflate_dim(
+                    cache_data.position_ids.view(-1), flat_indices
+                )[
                     None,
                 ]
         input_ids = input_ids.view(-1, inp_len)  # bk 1+h
@@ -234,10 +211,9 @@ def speculative_generate(
         # Base model forward pass
         output = decode_model(
             input_ids,
-            position_ids=position_ids,
             cache_data=cache_data,
             return_embeds=True,
-            **kwargs
+            use_cache=True,
         )  # 1 n' v  OR  bk 1+h v
         logits, _, embeds = output  # 1 n' v, 1 n' d  OR  bk 1+h v, bk 1+h d
         next_vals = torch.argmax(logits, dim=-1)  # 1 n'  OR  bk 1+h
