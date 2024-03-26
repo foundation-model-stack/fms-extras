@@ -47,7 +47,7 @@ def test_paged_generate():
         [1] + [i for i in range(5, 25)], dtype=torch.long, device="cuda"
     )
 
-    paged_result, _, _ = paged_generate(
+    paged_result, _, _, _ = paged_generate(
         paged_llama, [input_ids], kv_cache_manager, do_sample=False
     )
 

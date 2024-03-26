@@ -229,7 +229,7 @@ def test_allocate_tokens():
         ]
         position_ids.append(positions)
     torch.testing.assert_allclose(
-        cache_data.compute_position_ids(sequence_lengths),
+        cache_data.position_ids,
         torch.tensor(position_ids, dtype=torch.long, device="cuda"),
     )
 
@@ -268,7 +268,7 @@ def test_allocate_tokens():
         ]
         position_ids.append(positions)
     torch.testing.assert_allclose(
-        cache_data.compute_position_ids(num_tokens_per_sequence),
+        cache_data.position_ids,
         torch.tensor(position_ids, dtype=torch.long, device="cuda"),
     )
 

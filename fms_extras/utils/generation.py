@@ -1,6 +1,6 @@
 import functools
 import time
-from typing import Any, Callable, List, MutableMapping, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, MutableMapping, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -84,6 +84,7 @@ def paged_generate(
         decode_model = model
 
     bsize = len(input_ids_list)
+    prefill = True
 
     if cudagraphs and bsize != 1:
         raise NotImplementedError(
@@ -92,10 +93,10 @@ def paged_generate(
 
     # Build padded batched input tensor
     max_len = max([seq.size(0) for seq in input_ids_list])
-    num_tokens_per_sequence = [seq.size(0) for seq in input_ids_list]
+    model_input_lengths = [seq.size(0) for seq in input_ids_list]
     input_ids = torch.stack(
         [
-            F.pad(input_ids_list[i], (max_len - num_tokens_per_sequence[i], 0))
+            F.pad(input_ids_list[i], (max_len - model_input_lengths[i], 0))
             for i in range(bsize)
         ]
     )
@@ -105,32 +106,20 @@ def paged_generate(
     kwargs: MutableMapping[str, Any] = dict()
     kwargs["cache_data"] = None
     kwargs["use_cache"] = True
+    kwargs["mask"] = __create_prefill_mask(model_input_lengths, device=input_ids.device)
     sequence_ids: Optional[List[int]] = None
     block_mapping_max = ((max_len + max_new_tokens) // 16) + 1
     for i in range(max_new_tokens):
         if i == 1:
             start_time = time.time()
+            kwargs["mask"] = None
+            sequence_ids = kwargs["cache_data"].sequence_ids
+            model_input_lengths = [1 for _ in range(bsize)]
 
         input_ids = next_input[:, -max_seq_len:]
 
-        # compute the mask
-        if i == 0:
-            kwargs["mask"] = __create_prefill_mask(
-                num_tokens_per_sequence, device=input_ids.device
-            )
-        else:
-            kwargs["mask"] = None
-            num_tokens_per_sequence = [1 for _ in range(input_ids.size(0))]
-
-        cache_data = kv_cache_manager.allocate_tokens(
-            num_tokens_per_sequence, sequence_ids
-        )
-
-        sequence_ids = cache_data.sequence_ids
-
-        kwargs["cache_data"] = cache_data
-        kwargs["position_ids"] = cache_data.compute_position_ids(
-            num_tokens_per_sequence
+        kwargs["cache_data"] = kv_cache_manager.allocate_tokens(
+            model_input_lengths, sequence_ids
         )
 
         if i == 0:
