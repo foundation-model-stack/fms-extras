@@ -172,13 +172,15 @@ class MLPSpeculator(nn.Module):
         return torch.stack(out, dim=0)  # h b n v
 
 
-def select_inflate_dim(
+def apply_index_map(
     inp: torch.Tensor, inds: torch.Tensor, dim: int = 0
 ) -> torch.Tensor:
     """
-    Takes an input of size ([...], n, [...]), with n in slot corresponding to value of dim,
+    Applies index map to specified dimension of input tensor. Used for batch flattening/unflattening.
+    
+    More precisely, takes input of size ([...], n, [...]), with n in the dim-th dimension,
     and tensor of indices of size (a, ..., z). Using those indices we over/under sample the
-    input on dimension n, to create output tensor with size ([...], (a, ..., z), [...]).
+    input on dimension dim, to create output tensor with size ([...], (a, ..., z), [...]).
 
     i.e. if dim=0, inp has size (6,3,2), and inds has size (8,4), then:
     1) max(inds) < 6
@@ -226,38 +228,30 @@ def flatten_batch(inp: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.
             2) a tensor, sized as input, mapping each input token to its slot in output
             3) a tensor, sized as output, mapping each output token to its slot in the flattened input
     """
-    ind_out = torch.zeros_like(inp)
+    unflat_map = torch.zeros_like(inp)
     inp_list = inp.tolist()
-    out = []
-    ind_flat = []
+    flat_map = []
     batch_offset = 0
+    # Generate the flatten/unflatten maps
     for b, candidate_set in enumerate(inp_list):
-        lineages: List[Tuple[List[int]]] = []
+        lineages: Dict[Tuple[List[int]]] = {} # Prefix : n unique prefixes observed so far
         for k, candidate in enumerate(candidate_set):
             for n in range(len(candidate)):
                 lineage = tuple(candidate[: n + 1])
                 if lineage in lineages:
                     # Token is redundant
-                    ind_out[b, k, n] = lineages.index(lineage) + batch_offset
+                    unflat_map[b, k, n] = lineages[lineage] + batch_offset
                 else:
                     # Token is not redundant
-                    ind_out[b, k, n] = len(lineages) + batch_offset
-                    lineages.append(lineage)
-                    ind_flat.append(
-                        b * len(inp_list[0]) * len(inp_list[0][0])
-                        + k * len(inp_list[0][0])
+                    unflat_map[b, k, n] = len(lineages) + batch_offset
+                    lineages[lineage] = len(lineages)
+                    flat_map.append(
+                        b * len(candidate_set) * len(candidate)
+                        + k * len(candidate)
                         + n
                     )
-        out.append(
-            torch.tensor(
-                [lineage[-1] for lineage in lineages],
-                device=ind_out.device,
-                dtype=torch.int32,
-            )
-        )
         batch_offset += len(lineages)
-    return (
-        torch.cat(out),
-        ind_out,
-        torch.tensor(ind_flat, device=ind_out.device, dtype=torch.int32),
-    )
+    # Generate the flattened batch
+    flat_map = torch.tensor(flat_map, device=unflat_map.device, dtype=torch.int32)
+    out = apply_index_map(inp.view(-1), flat_map, 0)
+    return out, unflat_map, flat_map
