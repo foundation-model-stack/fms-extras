@@ -9,7 +9,7 @@ import torch._inductor.lowering as lowering
 from torch._dynamo import mark_static_address
 from torch._inductor.virtualized import V
 
-from fms_extras.models.speculator import select_inflate_dim
+from fms_extras.models.speculator import apply_index_map
 from fms_extras.paged_c import attn_ops, cache_ops  # type: ignore
 
 
@@ -331,8 +331,8 @@ class PagedAttentionCacheDataLayer:
             keys = keys.squeeze(0)
             values = values.squeeze(0)
 
-            keys = select_inflate_dim(keys, self.unflatten_indices)  # b k n h d
-            values = select_inflate_dim(values, self.unflatten_indices)
+            keys = apply_index_map(keys, self.unflatten_indices)  # b k n h d
+            values = apply_index_map(values, self.unflatten_indices)
             key_to_cache = keys.view(-1, *keys.size()[3:])
             value_to_cache = values.view(-1, *values.size()[3:])  # bkn h d
         else:

@@ -177,7 +177,7 @@ def apply_index_map(
 ) -> torch.Tensor:
     """
     Applies index map to specified dimension of input tensor. Used for batch flattening/unflattening.
-    
+
     More precisely, takes input of size ([...], n, [...]), with n in the dim-th dimension,
     and tensor of indices of size (a, ..., z). Using those indices we over/under sample the
     input on dimension dim, to create output tensor with size ([...], (a, ..., z), [...]).
@@ -234,7 +234,9 @@ def flatten_batch(inp: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.
     batch_offset = 0
     # Generate the flatten/unflatten maps
     for b, candidate_set in enumerate(inp_list):
-        lineages: Dict[Tuple[List[int]]] = {} # Prefix : n unique prefixes observed so far
+        lineages: Dict[
+            Tuple[List[int]]
+        ] = {}  # Prefix : n unique prefixes observed so far
         for k, candidate in enumerate(candidate_set):
             for n in range(len(candidate)):
                 lineage = tuple(candidate[: n + 1])
@@ -246,9 +248,7 @@ def flatten_batch(inp: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.
                     unflat_map[b, k, n] = len(lineages) + batch_offset
                     lineages[lineage] = len(lineages)
                     flat_map.append(
-                        b * len(candidate_set) * len(candidate)
-                        + k * len(candidate)
-                        + n
+                        b * len(candidate_set) * len(candidate) + k * len(candidate) + n
                     )
         batch_offset += len(lineages)
     # Generate the flattened batch

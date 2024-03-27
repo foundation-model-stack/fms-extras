@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from fms_extras.models.speculator import (
     MLPSpeculator,
     flatten_batch,
-    select_inflate_dim,
+    apply_index_map,
 )
 from fms_extras.utils.cache.paged import PagedAttentionCacheData, PagedKVCacheManager
 
@@ -152,7 +152,7 @@ def speculative_generate(
                 flat_inputs = flat_inputs[None,]  # 1 n'
                 cache_data.unflatten_indices = unflat_indices
                 cache_data.flatten_indices = flat_indices
-                cache_data.position_ids = select_inflate_dim(
+                cache_data.position_ids = apply_index_map(
                     cache_data.position_ids.view(-1), flat_indices
                 )[
                     None,
@@ -181,10 +181,10 @@ def speculative_generate(
         )  # bkn n_blocks
         # If batch is flattened, flatten corresponding metadata too
         if cache_data.flatten_indices is not None:
-            context_lengths = select_inflate_dim(
+            context_lengths = apply_index_map(
                 context_lengths, cache_data.flatten_indices
             )  # n'
-            block_mappings = select_inflate_dim(
+            block_mappings = apply_index_map(
                 block_mappings, cache_data.flatten_indices
             )  # n' n_blocks
 
@@ -220,8 +220,8 @@ def speculative_generate(
 
         # If we used batch flattening / tree attention, unflatten the outputs
         if this_flatting:
-            next_vals = select_inflate_dim(next_vals[0], unflat_indices)  # b k 1+h
-            embeds = select_inflate_dim(embeds[0], unflat_indices)  # b k 1+h d
+            next_vals = apply_index_map(next_vals[0], unflat_indices)  # b k 1+h
+            embeds = apply_index_map(embeds[0], unflat_indices)  # b k 1+h d
         else:
             next_vals = next_vals.view(bsize, n_candidates, inp_len)  # b k 1+h
             embeds = embeds.view(
