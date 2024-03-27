@@ -9,6 +9,7 @@ import torch._inductor.lowering as lowering
 from torch._dynamo import mark_static_address
 from torch._inductor.virtualized import V
 
+from fms_extras.models.speculator import apply_index_map
 from fms_extras.paged_c import attn_ops, cache_ops  # type: ignore
 
 
@@ -296,6 +297,9 @@ class PagedAttentionCacheDataLayer:
     kv_heads: int
     head_size: int
     is_generating: bool
+    query_length: int
+    flatten_indices: Optional[torch.Tensor] = None
+    unflatten_indices: Optional[torch.Tensor] = None
 
     def get_cache_type(self) -> str:
         return "paged-attention"
@@ -318,8 +322,22 @@ class PagedAttentionCacheDataLayer:
         Tuple[torch.Tensor, torch.Tensor]
             the updated keys and values to be passed in to attention computation
         """
-        key_to_cache = keys.view(-1, self.kv_heads, self.head_size)
-        value_to_cache = values.view(-1, self.kv_heads, self.head_size)
+        # in the case where the indices have been flattened for performance purposes, we must unflatten them to the
+        # format expected in the reshape_and_cache function
+        if self.unflatten_indices is not None:
+            # inp: n' h d
+            # inds: b k n
+            # if we have a batch, it will be size 1 here, so will need to be removed, otherwise no-op
+            keys = keys.squeeze(0)
+            values = values.squeeze(0)
+
+            keys = apply_index_map(keys, self.unflatten_indices)  # b k n h d
+            values = apply_index_map(values, self.unflatten_indices)
+            key_to_cache = keys.view(-1, *keys.size()[3:])
+            value_to_cache = values.view(-1, *values.size()[3:])  # bkn h d
+        else:
+            key_to_cache = keys.view(-1, self.kv_heads, self.head_size)
+            value_to_cache = values.view(-1, self.kv_heads, self.head_size)
 
         self.data_layer = torch.ops.paged_attention.reshape_and_cache(
             key_to_cache,
@@ -448,6 +466,9 @@ class PagedAttentionCacheData:
     head_size: int
     is_generating: bool
     sequence_ids: List[int]
+    query_length: int
+    flatten_indices: Optional[torch.Tensor] = None
+    unflatten_indices: Optional[torch.Tensor] = None
 
     def get_layer(self, layer_index: int) -> PagedAttentionCacheDataLayer:
         """
@@ -476,6 +497,9 @@ class PagedAttentionCacheData:
             kv_heads=self.kv_heads,
             head_size=self.head_size,
             is_generating=self.is_generating,
+            query_length=self.query_length,
+            flatten_indices=self.flatten_indices,
+            unflatten_indices=self.unflatten_indices,
         )
 
     def is_filled(self) -> bool:
@@ -1031,6 +1055,9 @@ class PagedKVCacheManager:
             head_size=self.head_size,
             is_generating=not is_prompt,
             sequence_ids=sequence_ids,
+            query_length=0
+            if max_num_tokens_per_sequence is None
+            else max_num_tokens_per_sequence,
         )
 
     def allocate_tokens(
