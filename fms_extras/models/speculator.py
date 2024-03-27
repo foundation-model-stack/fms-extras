@@ -228,7 +228,7 @@ def flatten_batch(inp: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.
             2) a tensor, sized as input, mapping each input token to its slot in output
             3) a tensor, sized as output, mapping each output token to its slot in the flattened input
     """
-    unflat_map = torch.zeros_like(inp)
+    unflat_map = torch.zeros_like(inp, dtype=torch.int)
     inp_list = inp.tolist()
     flat_map = []
     batch_offset = 0

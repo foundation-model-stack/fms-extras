@@ -5,11 +5,7 @@ from typing import Any, Callable, Dict, List, MutableMapping, Optional, Tuple, U
 import torch
 import torch.nn.functional as F
 
-from fms_extras.models.speculator import (
-    MLPSpeculator,
-    flatten_batch,
-    apply_index_map,
-)
+from fms_extras.models.speculator import MLPSpeculator, apply_index_map, flatten_batch
 from fms_extras.utils.cache.paged import PagedAttentionCacheData, PagedKVCacheManager
 
 
