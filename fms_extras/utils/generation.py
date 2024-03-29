@@ -3,10 +3,342 @@ import time
 from typing import Any, Callable, Dict, List, MutableMapping, Optional, Tuple, Union
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 from fms_extras.models.speculator import MLPSpeculator, apply_index_map, flatten_batch
 from fms_extras.utils.cache.paged import PagedAttentionCacheData, PagedKVCacheManager
+
+
+def __prepare_inputs_for_prefill(
+    input_ids: Union[torch.Tensor, List[torch.Tensor]],
+    kv_cache_manager: PagedKVCacheManager,
+    model_input_lengths: List[int],
+    max_length_in_batch: int,
+    decode_seq_length: int,
+    max_sequence_length_in_model: int,
+) -> Tuple[torch.Tensor, PagedAttentionCacheData, torch.Tensor]:
+    """Prepare all inputs required to perform prefill step on prompt tokens
+
+    This function will:
+
+    Args:
+        input_ids: Union[torch.Tensor, List[torch.Tensor]]
+            list of prompts where each tensor in the list corresponds to a single prompt in the batch
+        kv_cache_manager: PagedKVCacheManager
+            the paged attention kv-cache manager
+        model_input_lengths: List[int]
+            list where each value corresponds the number of tokens in the prompt at that index
+        max_length_in_batch: int
+            the max prompt length in the batch
+        decode_seq_length: int
+            the model input length at decode step
+        max_sequence_length_in_model: int
+            the max sequence length given to generate, typically the model's max sequence length
+
+    Returns:
+    Tuple[torch.Tensor, PagedAttentionCacheData, torch.Tensor]
+        the padded input ids, the cache data, and the mask
+    """
+    # pad the inputs
+    inputs = torch.stack(
+        [
+            F.pad(input_ids[i], (max_length_in_batch - model_input_lengths[i], 0))
+            for i in range(len(input_ids))
+        ]
+    )
+
+    # reserve blocks in the cache for the prompts
+    cache_data: PagedAttentionCacheData = kv_cache_manager.allocate_tokens(
+        model_input_lengths
+    )
+
+    # Build padded causal mask
+    mask = __create_prefill_mask(model_input_lengths, inputs.device)
+
+    # get the last tokens if past max length in model
+    inputs = inputs[:, -max_sequence_length_in_model + decode_seq_length :]
+
+    return inputs, cache_data, mask
+
+
+def __allocate_candidate_sequences(
+    kv_cache_manager: PagedKVCacheManager,
+    parent_sequence_ids: List[int],
+    model_input_lengths: List[int],
+    num_candidates_per_sequence: int,
+) -> Tuple[PagedAttentionCacheData, List[List[int]], List[int]]:
+    """
+    In speculative generate, for each sequence, candidates are created. This method will allocate these candidates in
+    the kv-cache as child candidates (candidates which are referencing their parents as a prefix)
+
+    Args:
+        kv_cache_manager: PagedKVCacheManager
+            the paged attention kv-cache manager
+        parent_sequence_ids: List[int]
+            the parent sequence ids associated with each prompt in the batch
+        model_input_lengths: List[int]
+            list where each value corresponds the number of tokens in the prompt at that index
+        num_candidates_per_sequence: int
+            the number of child candidates to create for each sequence
+
+    Returns:
+    Tuple[PagedAttentionCacheData, List[List[int]], List[int]]
+        the cache data created after allocation, the list of child sequences per parent, the list of child sequences per parent flattened
+    """
+    child_sequence_ids_list = []
+    child_sequence_ids_flattened = []
+    # each parent will have n_candidates child sequences
+    for parent_sequence_id in parent_sequence_ids:
+        child_sequence_ids = kv_cache_manager.add_child_sequences(
+            parent_sequence_id, num_candidates_per_sequence
+        )
+        child_sequence_ids_list.append(child_sequence_ids)
+        child_sequence_ids_flattened.extend(child_sequence_ids)
+
+    # add inp_len tokens to each candidate
+    cache_data = kv_cache_manager.allocate_tokens(
+        model_input_lengths, child_sequence_ids_flattened
+    )
+    return cache_data, child_sequence_ids_list, child_sequence_ids_flattened
+
+
+def __free_incorrect_tokens_and_sequences(
+    kv_cache_manager: PagedKVCacheManager,
+    child_sequence_ids_list: List[List[int]],
+    best_guess: torch.Tensor,
+    n_correct: torch.Tensor,
+    decode_seq_length: int,
+) -> List[int]:
+    """
+    Free all non-best candidate sequences from the kv-cache and for best candidate sequences, logically remove tokens
+    based on the number of incorrect tokens generated
+
+    Args:
+        kv_cache_manager: PagedKVCacheManager
+            the paged attention kv-cache manager
+        child_sequence_ids_list: List[List[int]]
+            the list of child sequences per parent
+        best_guess: torch.Tensor
+            a tensor containing the best candidate per sequence in the batch
+        n_correct: torch.Tensor
+            a tensor containing the number of correct tokens best candidate in the batch
+        decode_seq_length: int
+            the model input length at decode step
+
+    Returns:
+    List[int]
+        a list of the new parent sequence ids for next decode step
+    """
+    parent_sequence_ids = []
+    for parent_index, child_sequence_ids in enumerate(child_sequence_ids_list):
+        best_index = int(best_guess[parent_index].item())
+
+        # free all bad candidates
+        kv_cache_manager.free_sequences(
+            child_sequence_ids[:best_index] + child_sequence_ids[best_index + 1 :]
+        )
+
+        # decrease the context length of the sequence which used to be sequence length + inp_len by the number of incorrect tokens
+        # for the best candidate
+        best_sequence_id = child_sequence_ids[best_index]
+        parent_sequence_ids.append(best_sequence_id)
+        kv_cache_manager.remove_tokens(
+            best_sequence_id, decode_seq_length - n_correct[parent_index].item() - 1  # type: ignore
+        )
+    return parent_sequence_ids
+
+
+def __apply_batch_expansion_to_cache_metadata(
+    cache_data: PagedAttentionCacheData,
+) -> PagedAttentionCacheData:
+    """
+    When performing paged attention, the kernels require that the sequence length be of size 1. In typical generation,
+    this is fine as only 1 token is ever being sent into the model for each sequence in the batch, however for
+    speculative decoding, n tokens are sent for each sequence in the batch where n is the number of predictions.
+
+    To properly run paged attention with the larger sequence length, we must expand the sequence into the batch
+    dimension, and modify the cache metadata to reflect this.
+
+    example:
+
+    model_input_lengths: [4, 4]
+
+    before expansion:
+
+    block_mapping -
+
+    [
+      [1, 2],
+      [10, 11, 12, 13]
+    ]
+
+    context_lengths -
+
+    [22, 66]
+
+    after expansion:
+
+    block_mapping -
+
+    [
+        [1, 2],
+        [1, 2],
+        [1, 2],
+        [1, 2],
+        [10, 11, 12],
+        [10, 11, 12],
+        [10, 11, 12, 13],
+        [10, 11, 12, 13],
+    ]
+
+    context_lengths -
+
+    [19, 20, 21, 22, 63, 64, 65, 66]
+
+    Args:
+        cache_data: PagedAttentionCacheData
+            the cache data created after allocation
+
+    Returns:
+    PagedAttentionCacheData
+        The cache data after applying batch expansion
+    """
+    # Set up kv cache metadata for paged memory access over tokens/candidates with shared prefixes
+    context_lengths = cache_data.context_lengths  # bk
+    inflate_factor = (
+        cache_data.query_length
+        if cache_data.unflatten_indices is None
+        else cache_data.unflatten_indices.size(-1)
+    )
+    # no reason to check type here as generation allocation always returns context_lengths
+    context_lengths = context_lengths.unsqueeze(1).expand(  # type: ignore
+        -1, inflate_factor
+    )  # bk n
+    # subtract arange(inp_len) to get lengths for each token in candidates
+    cache_data.context_lengths = (
+        context_lengths.sub(context_lengths.sign().cumsum(1).flip([1]).sub(1))
+        .int()
+        .view(-1)
+    )  # bkn
+    cache_data.block_mapping = cache_data.block_mapping.repeat_interleave(
+        inflate_factor, dim=0
+    )  # bkn n_blocks
+    return cache_data
+
+
+def __prepare_cache_metadata_for_flattening(
+    cache_data: PagedAttentionCacheData,
+    unflat_indices: torch.Tensor,
+    flat_indices: torch.Tensor,
+) -> PagedAttentionCacheData:
+    """Add the proper metadata to the cache required to perform batch flattening/unflattening
+
+    Args:
+        cache_data: PagedAttentionCacheData
+            the paged attention cache data / metadata
+        unflat_indices: torch.Tensor
+            the indices used in performing unflattening prior to storing in the cache
+        flat_indices: torch.Tensor
+            the indices used in performing flattening
+
+    Returns:
+    PagedAttentionCacheData
+        the cache data with proper unflattening metadata included
+    """
+    cache_data.unflatten_indices = unflat_indices
+    cache_data.flatten_indices = flat_indices
+    cache_data.position_ids = apply_index_map(
+        cache_data.position_ids.view(-1), flat_indices
+    )[
+        None,
+    ]
+    cache_data.context_lengths = apply_index_map(
+        cache_data.context_lengths, cache_data.flatten_indices  # type: ignore
+    )  # n'
+    cache_data.block_mapping = apply_index_map(
+        cache_data.block_mapping, cache_data.flatten_indices
+    )  # n' n_blocks
+
+    return cache_data
+
+
+def __perform_correctness_checks(
+    input_ids_unflat: torch.Tensor,
+    next_vals: torch.Tensor,
+    embeds: torch.Tensor,
+    batch_size: int,
+    num_candidates_per_sequence: int,
+    decode_seq_length: int,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Check for the correctness of speculator predictions and get the best candidates as well as the number of tokens
+    correct for each of those candidates
+
+    Args:
+        input_ids_unflat: torch.Tensor
+            the original input ids unflattened
+        next_vals: torch.Tensor
+            a tensor of the next tokens
+        embeds: torch.Tensor
+            the output embeddings for the best guesses
+        batch_size: int
+            the number of sequences in the batch
+        num_candidates_per_sequence: int
+            the number of candidates created per sequence
+        decode_seq_length: int
+            the model input length at decode step
+
+    Returns:
+    Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+        a tensor of the next tokens per best guess, a tensor of the embeds per best guess, a tensor of the number of
+        correct tokens per best guess, and a tensor containing the best guess amongst all candidates per sequence
+    """
+    # Check correctness of speculator predictions
+    test = input_ids_unflat[:, :, 1:].eq(next_vals[:, :, :-1]).cumprod(2)
+    n_correct = test.sum(2).view(batch_size, num_candidates_per_sequence)
+    best_guess = n_correct.argmax(1)  # b
+    best_guess_unflat = (
+        best_guess.unsqueeze(1).expand(batch_size, decode_seq_length).unsqueeze(1)
+    )  # b 1 1+h
+
+    # Set global values to those of best guess
+    next_vals = next_vals.gather(1, best_guess_unflat).squeeze(1)  # b 1+h
+    n_correct = n_correct.gather(1, best_guess.unsqueeze(1)).squeeze(1)  # b
+    embeds = embeds.gather(
+        1, best_guess_unflat.unsqueeze(3).expand(-1, -1, -1, embeds.size(3))
+    ).squeeze(
+        1
+    )  # b 1+h d
+    return next_vals, embeds, n_correct, best_guess
+
+
+def __get_correct_tokens(
+    next_vals: torch.Tensor, n_correct: torch.Tensor, embeds: torch.Tensor
+) -> Tuple[List[torch.Tensor], torch.Tensor]:
+    """
+    get the correct tokens and embeds
+
+    Args:
+        next_vals: torch.Tensor
+            a tensor of the next tokens per best guess
+        n_correct: torch.Tensor
+            a tensor of the number of correct tokens per best guess
+        embeds: torch.Tensor
+            a tensor of the embeds per best guess
+
+    Returns:
+    Tuple[List[torch.Tensor], torch.Tensor]
+        a list of tensor of the correct tokens, and a tensor of the correct embeddings
+    """
+    next_vals_split = list(next_vals)
+    next_vals_split = [
+        next_vals_split[i][: n_correct[i] + 1] for i in range(len(next_vals_split))
+    ]  # [b] h'
+    embeds = embeds.gather(
+        1, n_correct.view(-1, 1, 1).expand(-1, -1, embeds.size(2))
+    )  # Grab last correct embed
+    return next_vals_split, embeds
 
 
 def speculative_generate(
@@ -46,8 +378,12 @@ def speculative_generate(
             than or equal to n_candidates (we cannot have more candidates than tree leaves).
         flatting: enable batch flattening / tree attention with redundant prefix removal when compression
             ratio is favorable. Adds extra overhead to shrink the token count in each batch.
-        decode_model: TODO
-        cudagraphs: TODO
+        decode_model: nn.Module, optional
+            an optional model that performs the decode forward step. If None, will use the function or nn.Module
+            provided to model param to perform decode forward. (default is None)
+        cudagraphs: bool
+            if True, cudagraphs is used and all metadata will be padded, otherwise metadata will not be padded unless
+            required. Note: This is a WIP and only works for batch_size=1
     Returns:
         result: List of id tensors, possibly different lengths if batching.
         n_steps: Number of foward passes used to generate provided tokens.
@@ -64,27 +400,16 @@ def speculative_generate(
         )
 
     result = input_ids  # [b] n
-
-    # Build padded batched input tensor
     max_len = max([seq.size(0) for seq in input_ids])
     model_input_lengths = [seq.size(0) for seq in input_ids]
-    inputs = torch.stack(
-        [
-            F.pad(input_ids[i], (max_len - model_input_lengths[i], 0))
-            for i in range(bsize)
-        ]
-    )
-    cache_data: PagedAttentionCacheData = kv_cache_manager.allocate_tokens(
-        model_input_lengths
-    )
-    parent_sequence_ids = cache_data.sequence_ids
-
-    # Build padded causal mask
-    mask = __create_prefill_mask(model_input_lengths, inputs.device)
-
-    # Build kv cache and get initial state vector
     inp_len = speculator.n_predict + 1
-    inputs = inputs[:, -max_seq_len + inp_len :]
+
+    # prepare model input for prefill
+    inputs, cache_data, mask = __prepare_inputs_for_prefill(
+        input_ids, kv_cache_manager, model_input_lengths, max_len, inp_len, max_seq_len
+    )
+
+    # perform prefill
     output = model(
         inputs,
         mask=mask,
@@ -95,9 +420,13 @@ def speculative_generate(
     logits, _, embeds = output
     embeds = embeds[:, -1:]  # b 1 d
     logits = logits[:, -1:]  # b 1 v
+
+    # get the time to first token
     ttft = time.time() - start_time
 
     start_time = time.time()
+
+    parent_sequence_ids = cache_data.sequence_ids
     n_gen = torch.zeros(bsize, device=inputs.device, dtype=torch.int)
     n_steps = 0
     input_ids = torch.argmax(logits, dim=2)  # b 1
@@ -106,26 +435,19 @@ def speculative_generate(
         for line, input_id in zip(result, list(input_ids))
     ]
     block_mapping_max = ((max_len + new_tokens) // 16) + 1
+    # perform decode step
     while min(n_gen) < new_tokens:
         n_steps += 1
 
-        # create candidate sequences
-        child_sequence_ids_list = []
-        child_sequence_ids_flattened = []
-        num_tokens_per_sequence = [
-            inp_len for _ in range(input_ids.size(0) * n_candidates)
-        ]
-        # each parent will have n_candidates child sequences
-        for parent_sequence_id in parent_sequence_ids:
-            child_sequence_ids = kv_cache_manager.add_child_sequences(
-                parent_sequence_id, n_candidates
-            )
-            child_sequence_ids_list.append(child_sequence_ids)
-            child_sequence_ids_flattened.extend(child_sequence_ids)
+        model_input_lengths = [inp_len for _ in range(input_ids.size(0) * n_candidates)]
 
-        # add inp_len tokens to each candidate
-        cache_data = kv_cache_manager.allocate_tokens(
-            num_tokens_per_sequence, child_sequence_ids_flattened
+        # allocate candidate sequences in cache and get the sequence ids
+        (
+            cache_data,
+            child_sequence_ids_list,
+            child_sequence_ids_flattened,
+        ) = __allocate_candidate_sequences(
+            kv_cache_manager, parent_sequence_ids, model_input_lengths, n_candidates
         )
 
         # Get candidate set of speculations
@@ -137,72 +459,36 @@ def speculative_generate(
         ).int()  # b k 1+h
 
         # Apply batch flattening / tree attention if compression is good enough
-        this_flatting = False
+        perform_batch_flattening = False
         if flatting:
             flat_inputs, unflat_indices, flat_indices = flatten_batch(
                 input_ids
             )  # n', b k 1+h, n'
             compression = flat_inputs.numel() / input_ids.numel()
+            # check if high enough level of compression to perform batch flattening
             if compression < 0.75:
-                this_flatting = True
+                perform_batch_flattening = True
                 flat_inputs = flat_inputs[None,]  # 1 n'
-                cache_data.unflatten_indices = unflat_indices
-                cache_data.flatten_indices = flat_indices
-                cache_data.position_ids = apply_index_map(
-                    cache_data.position_ids.view(-1), flat_indices
-                )[
-                    None,
-                ]
+
         input_ids = input_ids.view(-1, inp_len)  # bk 1+h
+        input_ids_unflat = input_ids.view(bsize, n_candidates, inp_len)
 
         # Set up kv cache metadata for paged memory access over tokens/candidates with shared prefixes
-        context_lengths = cache_data.context_lengths  # bk
-        inflate_factor = (
-            cache_data.query_length
-            if cache_data.unflatten_indices is None
-            else cache_data.unflatten_indices.size(-1)
-        )
-        # no reason to check type here as generation allocation always returns context_lengths
-        context_lengths = context_lengths.unsqueeze(1).expand(  # type: ignore
-            -1, inflate_factor
-        )  # bk n
-        # subtract arange(inp_len) to get lengths for each token in candidates
-        context_lengths = (
-            context_lengths.sub(context_lengths.sign().cumsum(1).flip([1]).sub(1))
-            .int()
-            .view(-1)
-        )  # bkn
-        block_mappings = cache_data.block_mapping.repeat_interleave(
-            inflate_factor, dim=0
-        )  # bkn n_blocks
+        cache_data = __apply_batch_expansion_to_cache_metadata(cache_data)
+
         # If batch is flattened, flatten corresponding metadata too
-        if cache_data.flatten_indices is not None:
-            context_lengths = apply_index_map(
-                context_lengths, cache_data.flatten_indices
-            )  # n'
-            block_mappings = apply_index_map(
-                block_mappings, cache_data.flatten_indices
-            )  # n' n_blocks
+        if perform_batch_flattening:
+            cache_data = __prepare_cache_metadata_for_flattening(
+                cache_data, unflat_indices, flat_indices
+            )
+            input_ids = flat_inputs
 
         # todo: This is a WIP to enable cudagraphs, currently its only for batch_size=1
+        # cudagraph requires static shapes
         if cudagraphs:
-            # pad for cudagraphs
-            block_mappings = torch.stack(
-                [
-                    F.pad(
-                        block_mappings[i],
-                        (0, block_mapping_max - block_mappings.size(1)),
-                    )
-                    for i in range(block_mappings.size(0))
-                ]
+            cache_data.block_mapping = __right_pad_zeros(
+                cache_data.block_mapping, block_mapping_max
             )
-
-        cache_data.block_mapping = block_mappings
-        cache_data.context_lengths = context_lengths
-
-        input_ids_unflat = input_ids.view(bsize, n_candidates, inp_len)
-        if this_flatting:
-            input_ids = flat_inputs
 
         # Base model forward pass
         output = decode_model(
@@ -215,7 +501,7 @@ def speculative_generate(
         next_vals = torch.argmax(logits, dim=-1)  # 1 n'  OR  bk 1+h
 
         # If we used batch flattening / tree attention, unflatten the outputs
-        if this_flatting:
+        if perform_batch_flattening:
             next_vals = apply_index_map(next_vals[0], unflat_indices)  # b k 1+h
             embeds = apply_index_map(embeds[0], unflat_indices)  # b k 1+h d
         else:
@@ -225,55 +511,24 @@ def speculative_generate(
             )  # b k 1+h d
 
         # Check correctness of speculator predictions
-        test = input_ids_unflat[:, :, 1:].eq(next_vals[:, :, :-1]).cumprod(2)
-        n_correct = test.sum(2).view(bsize, n_candidates)
-        best_guess = n_correct.argmax(1)  # b
-        best_guess_unflat = (
-            best_guess.unsqueeze(1).expand(bsize, inp_len).unsqueeze(1)
-        )  # b 1 1+h
-
-        # Set global values to those of best guess
-        next_vals = next_vals.gather(1, best_guess_unflat).squeeze(1)  # b 1+h
-        n_correct = n_correct.gather(1, best_guess.unsqueeze(1)).squeeze(1)  # b
-        embeds = embeds.gather(
-            1, best_guess_unflat.unsqueeze(3).expand(-1, -1, -1, embeds.size(3))
-        ).squeeze(
-            1
-        )  # b 1+h d
+        next_vals, embeds, n_correct, best_guess = __perform_correctness_checks(
+            input_ids_unflat, next_vals, embeds, bsize, n_candidates, inp_len
+        )
 
         # free all non-best candidates and keep best candidates as parents
-        parent_sequence_ids = []
-        for parent_index, child_sequence_ids in enumerate(child_sequence_ids_list):
-            best_index = int(best_guess[parent_index].item())
-
-            # free all bad candidates
-            kv_cache_manager.free_sequences(
-                child_sequence_ids[:best_index] + child_sequence_ids[best_index + 1 :]
-            )
-
-            # decrease the context length of the sequence which used to be sequence length + inp_len by the number of incorrect tokens
-            # for the best candidate
-            best_sequence_id = child_sequence_ids[best_index]
-            parent_sequence_ids.append(best_sequence_id)
-            kv_cache_manager.remove_tokens(
-                best_sequence_id, inp_len - n_correct[parent_index].item() - 1
-            )
+        parent_sequence_ids = __free_incorrect_tokens_and_sequences(
+            kv_cache_manager, child_sequence_ids_list, best_guess, n_correct, inp_len
+        )
 
         # Remove any wrong speculator tokens from best candidate
-        next_vals_split = list(next_vals)
-        next_vals_split = [
-            next_vals_split[i][: n_correct[i] + 1] for i in range(len(next_vals_split))
-        ]  # [b] h'
-        n_gen += n_correct + 1
-        embeds = embeds.gather(
-            1, n_correct.view(-1, 1, 1).expand(-1, -1, embeds.size(2))
-        )  # Grab last correct embed
+        next_vals_split, embeds = __get_correct_tokens(next_vals, n_correct, embeds)
 
         # Update results
         result = [
             torch.cat((result[i], next_vals_split[i]), dim=0) for i in range(bsize)
         ]
         input_ids = torch.stack([line[-1:] for line in next_vals_split], dim=0)  # b 1
+        n_gen += n_correct + 1
 
     kv_cache_manager.free_sequences(parent_sequence_ids, recursive=True)
     return result, n_steps, ttft, (time.time() - start_time)
