@@ -179,13 +179,13 @@ def apply_index_map(
     Applies index map to specified dimension of input tensor. Used for batch flattening/unflattening.
 
     More precisely, takes input of size ([...], n, [...]), with n in the dim-th dimension,
-    and tensor of indices of size (a, ..., z). Using those indices we over/under sample the
-    input on dimension dim, to create output tensor with size ([...], (a, ..., z), [...]).
+    and tensor of indices of size (a, ..., z). Using those indices we draw from the input
+    on dimension dim, to create output tensor with size ([...], (a, ..., z), [...]).
 
     i.e. if dim=0, inp has size (6,3,2), and inds has size (8,4), then:
     1) max(inds) < 6
     2) output has size (8,4,3,2)
-    3) we are oversampling (8*4 > 6)
+    3) the output contains repeated values (8*4 > 6)
 
     Args:
         inp: torch.Tensor
@@ -193,7 +193,7 @@ def apply_index_map(
         inds: torch.Tensor
             tensor of indices
         dim: int
-            dimension to sample on
+            dimension to index on
 
     Returns:
         torch.Tensor

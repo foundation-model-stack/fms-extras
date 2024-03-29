@@ -22,8 +22,10 @@ def test_flatten_unflatten():
     # Verify that unflat(flat(x)) == x
     inps = _get_test_inp()
     for inp in inps:
-        _, unflat_map, flat_map = flatten_batch(inp)
-        new_inp = apply_index_map(apply_index_map(inp.view(-1), flat_map), unflat_map)
+        inp_flat, unflat_map, flat_map = flatten_batch(inp)
+        new_flat = apply_index_map(inp.view(-1), flat_map)
+        torch.testing.assert_close(inp_flat, new_flat)
+        new_inp = apply_index_map(new_flat, unflat_map)
         torch.testing.assert_close(inp, new_inp)
 
 
@@ -32,7 +34,7 @@ def test_unflatten_flatten():
     inps = _get_test_inp()
     for inp in inps:
         inp_flat, unflat_map, flat_map = flatten_batch(inp)
-        new_inp = apply_index_map(
-            apply_index_map(inp_flat, unflat_map).view(-1), flat_map
-        )
-        torch.testing.assert_close(inp_flat, new_inp)
+        new_unflat = apply_index_map(inp_flat, unflat_map)
+        torch.testing.assert_close(inp, new_unflat)
+        new_inp_flat = apply_index_map(new_unflat.view(-1), flat_map)
+        torch.testing.assert_close(inp_flat, new_inp_flat)
