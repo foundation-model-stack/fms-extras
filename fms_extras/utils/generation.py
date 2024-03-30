@@ -20,8 +20,6 @@ def __prepare_inputs_for_prefill(
 ) -> Tuple[torch.Tensor, PagedAttentionCacheData, torch.Tensor]:
     """Prepare all inputs required to perform prefill step on prompt tokens
 
-    This function will:
-
     Args:
         input_ids: Union[torch.Tensor, List[torch.Tensor]]
             list of prompts where each tensor in the list corresponds to a single prompt in the batch
@@ -69,8 +67,9 @@ def __allocate_candidate_sequences(
     num_candidates_per_sequence: int,
 ) -> Tuple[PagedAttentionCacheData, List[List[int]], List[int]]:
     """
-    In speculative generate, for each sequence, candidates are created. This method will allocate these candidates in
-    the kv-cache as child candidates (candidates which are referencing their parents as a prefix)
+    Speculative generate produces suffix candidates for each sequence. This method allocates these candidates in the
+    kv-cache as child sequences (sequences referencing their parents as a prefix optimized for better memory efficiency
+    with less duplication)
 
     Args:
         kv_cache_manager: PagedKVCacheManager
@@ -272,8 +271,8 @@ def __perform_correctness_checks(
     decode_seq_length: int,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Check for the correctness of speculator predictions and get the best candidates as well as the number of tokens
-    correct for each of those candidates
+    Check for the correctness of speculator predictions and get the indices of the best candidates, the number of tokens
+    correct, and the base model output values for that candidate (tokens and embeddings)
 
     Args:
         input_ids_unflat: torch.Tensor
@@ -317,7 +316,8 @@ def __get_correct_tokens(
     next_vals: torch.Tensor, n_correct: torch.Tensor, embeds: torch.Tensor
 ) -> Tuple[List[torch.Tensor], torch.Tensor]:
     """
-    get the correct tokens and embeds
+    extract the correct tokens and the last correct embedding from each candidate, to be used to start the next set
+    of speculative candidates
 
     Args:
         next_vals: torch.Tensor
@@ -434,7 +434,7 @@ def speculative_generate(
         torch.cat((line, input_id), dim=0)
         for line, input_id in zip(result, list(input_ids))
     ]
-    block_mapping_max = ((max_len + new_tokens) // 16) + 1
+    block_mapping_max = ((max_len + new_tokens + inp_len - 1) // 16) + 1
     # perform decode step
     while min(n_gen) < new_tokens:
         n_steps += 1
