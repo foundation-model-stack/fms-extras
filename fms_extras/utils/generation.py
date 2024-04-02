@@ -389,10 +389,10 @@ def speculative_generate(
         raise NotImplementedError(
             "cudagraphs is not yet supported for batch sizes greater than 1 or flatting"
         )
-    
+
     result = input_ids  # [b] n
     inp_len = speculator.n_predict + 1
-    
+
     # get the last tokens if past max length in model
     input_ids = [seq[-max_seq_len + inp_len :] for seq in input_ids]
     model_input_lengths = [seq.size(0) for seq in input_ids]
@@ -400,7 +400,10 @@ def speculative_generate(
 
     # prepare model input for prefill
     inputs, cache_data, mask = __prepare_inputs_for_prefill(
-        input_ids, kv_cache_manager, model_input_lengths, max_len,
+        input_ids,
+        kv_cache_manager,
+        model_input_lengths,
+        max_len,
     )
 
     # perform prefill
