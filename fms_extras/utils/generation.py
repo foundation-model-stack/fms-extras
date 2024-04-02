@@ -15,8 +15,6 @@ def __prepare_inputs_for_prefill(
     kv_cache_manager: PagedKVCacheManager,
     model_input_lengths: List[int],
     max_length_in_batch: int,
-    decode_seq_length: int,
-    max_sequence_length_in_model: int,
 ) -> Tuple[torch.Tensor, PagedAttentionCacheData, torch.Tensor]:
     """Prepare all inputs required to perform prefill step on prompt tokens
 
@@ -29,10 +27,6 @@ def __prepare_inputs_for_prefill(
             list where each value corresponds the number of tokens in the prompt at that index
         max_length_in_batch: int
             the max prompt length in the batch
-        decode_seq_length: int
-            the model input length at decode step
-        max_sequence_length_in_model: int
-            the max sequence length given to generate, typically the model's max sequence length
 
     Returns:
     Tuple[torch.Tensor, PagedAttentionCacheData, torch.Tensor]
@@ -53,9 +47,6 @@ def __prepare_inputs_for_prefill(
 
     # Build padded causal mask
     mask = __create_prefill_mask(model_input_lengths, inputs.device)
-
-    # get the last tokens if past max length in model
-    inputs = inputs[:, -max_sequence_length_in_model + decode_seq_length :]
 
     return inputs, cache_data, mask
 
@@ -398,15 +389,18 @@ def speculative_generate(
         raise NotImplementedError(
             "cudagraphs is not yet supported for batch sizes greater than 1 or flatting"
         )
-
+    
     result = input_ids  # [b] n
-    max_len = max([seq.size(0) for seq in input_ids])
-    model_input_lengths = [seq.size(0) for seq in input_ids]
     inp_len = speculator.n_predict + 1
+    
+    # get the last tokens if past max length in model
+    input_ids = [seq[-max_seq_len + inp_len :] for seq in input_ids]
+    model_input_lengths = [seq.size(0) for seq in input_ids]
+    max_len = max(model_input_lengths)
 
     # prepare model input for prefill
     inputs, cache_data, mask = __prepare_inputs_for_prefill(
-        input_ids, kv_cache_manager, model_input_lengths, max_len, inp_len, max_seq_len
+        input_ids, kv_cache_manager, model_input_lengths, max_len,
     )
 
     # perform prefill
