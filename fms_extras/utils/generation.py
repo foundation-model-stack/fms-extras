@@ -56,7 +56,7 @@ def __allocate_candidate_sequences(
     parent_sequence_ids: List[int],
     model_input_lengths: List[int],
     num_candidates_per_sequence: int,
-) -> Tuple[PagedAttentionCacheData, List[List[int]], List[int]]:
+) -> Tuple[PagedAttentionCacheData, List[List[int]]]:
     """
     Speculative generate produces suffix candidates for each sequence. This method allocates these candidates in the
     kv-cache as child sequences (sequences referencing their parents as a prefix optimized for better memory efficiency
@@ -74,7 +74,7 @@ def __allocate_candidate_sequences(
 
     Returns:
     Tuple[PagedAttentionCacheData, List[List[int]], List[int]]
-        the cache data created after allocation, the list of child sequences per parent, the list of child sequences per parent flattened
+        the cache data created after allocation, and the list of child sequences per parent
     """
     child_sequence_ids_list = []
     child_sequence_ids_flattened = []
@@ -90,7 +90,7 @@ def __allocate_candidate_sequences(
     cache_data = kv_cache_manager.allocate_tokens(
         model_input_lengths, child_sequence_ids_flattened
     )
-    return cache_data, child_sequence_ids_list, child_sequence_ids_flattened
+    return cache_data, child_sequence_ids_list
 
 
 def __free_incorrect_tokens_and_sequences(
@@ -439,11 +439,7 @@ def speculative_generate(
         model_input_lengths = [inp_len for _ in range(input_ids.size(0) * n_candidates)]
 
         # allocate candidate sequences in cache and get the sequence ids
-        (
-            cache_data,
-            child_sequence_ids_list,
-            child_sequence_ids_flattened,
-        ) = __allocate_candidate_sequences(
+        cache_data, child_sequence_ids_list = __allocate_candidate_sequences(
             kv_cache_manager, parent_sequence_ids, model_input_lengths, n_candidates
         )
 
