@@ -32,8 +32,10 @@ class MLPSpeculator(nn.Module):
         Number of heads / number of tokens to guess ahead. Model size and speed scale with this value.
     """
 
-    def __init__(self, emb_dim=4096, inner_dim=0, vocab_size=32000, n_predict=3):
-        super().__init__()
+    def __init__(
+        self, emb_dim=4096, inner_dim=0, vocab_size=32000, n_predict=3, *args, **kwargs
+    ):
+        super().__init__(*args, **kwargs)
         self.n_predict = n_predict
         self.emb_dim = emb_dim
         inner_dim = inner_dim if inner_dim != 0 else emb_dim
