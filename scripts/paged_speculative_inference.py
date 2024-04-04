@@ -209,7 +209,7 @@ def infer(ids, warmup):
             max_seq_len=model.config.max_expected_seq_len,
             decode_model=decode_model,
             # todo: we can only reduce-overhead for now when batch size is 1
-            flatting=not (args.compile and compile_mode == "reduce-overhead"),
+            flattening=not (args.compile and compile_mode == "reduce-overhead"),
             cudagraphs=cudagraphs,
         )
     else:

@@ -103,27 +103,36 @@ def __prepare_candidate_sequences_cache_data(
     )
 
     # Set up kv cache metadata for paged memory access over tokens/candidates with shared prefixes
-    cache_data = __apply_batch_expansion_to_cache_metadata(cache_data)
+    __apply_batch_expansion_to_cache_metadata(cache_data)
 
     return cache_data, child_sequence_ids_list
 
 
-def __conditionally_remove_redundant_tokens(
+def __maybe_flatten(
     input_ids: torch.Tensor,
-) -> Tuple[bool, torch.Tensor, torch.Tensor, torch.Tensor]:
+    cache_data: PagedAttentionCacheData,
+    flattening: bool,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
     """
     Remove redundant tokens if compression ratio of data is below 0.75
 
     Args:
         input_ids: torch.Tensor
             the input ids for a given decode step
+        cache_data: PagedAttentionCacheData
+            the paged-attention cache data
+        flattening: bool
+            denotes whether we want to attempt flattening
 
     Returns:
-        Tuple[bool, torch.Tensor, torch.Tensor, torch.Tensor]
-            a boolean denoting whether flattening should be performed, a tensor of the input_ids to be sent to decode
-            model, a tensor of the indices for performing the unflattening operation, a tensor of indices for performing
-            the flattening operation
+        Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]
+            a tensor of the input_ids to be sent to decode model, an optional tensor of the indices for performing the
+            un-flattening operation if redundant tokens are being removed, an optional tensor of indices for performing
+            the flattening operation if redundant tokens are being removed
     """
+    if not flattening:
+        return input_ids.view(-1, input_ids.size(2)), None, None
+
     # flatten the batch
     flat_inputs, unflat_indices, flat_indices = flatten_batch(
         input_ids
@@ -136,10 +145,14 @@ def __conditionally_remove_redundant_tokens(
     # set the correct input_ids to return if compression ratio satisfied
     if perform_batch_flattening:
         result_input_ids = flat_inputs[None,]  # 1 n'
-    else:
-        result_input_ids = input_ids
 
-    return perform_batch_flattening, result_input_ids, unflat_indices, flat_indices
+        __apply_flattening_to_cache_metadata(cache_data, unflat_indices, flat_indices)
+    else:
+        result_input_ids = input_ids.view(-1, input_ids.size(2))
+        unflat_indices = None  # type: ignore
+        flat_indices = None  # type: ignore
+
+    return result_input_ids, unflat_indices, flat_indices
 
 
 def __free_incorrect_tokens_and_sequences(
@@ -190,7 +203,7 @@ def __free_incorrect_tokens_and_sequences(
 
 def __apply_batch_expansion_to_cache_metadata(
     cache_data: PagedAttentionCacheData,
-) -> PagedAttentionCacheData:
+):
     """
     When performing paged attention, the kernels require that the sequence length be of size 1. In typical generation,
     this is fine as only 1 token is ever being sent into the model for each sequence in the batch, however for
@@ -238,10 +251,6 @@ def __apply_batch_expansion_to_cache_metadata(
     Args:
         cache_data: PagedAttentionCacheData
             the cache data created after allocation
-
-    Returns:
-    PagedAttentionCacheData
-        The cache data after applying batch expansion
     """
     # Set up kv cache metadata for paged memory access over tokens/candidates with shared prefixes
     context_lengths = cache_data.context_lengths  # bk
@@ -263,14 +272,13 @@ def __apply_batch_expansion_to_cache_metadata(
     cache_data.block_mapping = cache_data.block_mapping.repeat_interleave(
         inflate_factor, dim=0
     )  # bkn n_blocks
-    return cache_data
 
 
-def __prepare_cache_metadata_for_flattening(
+def __apply_flattening_to_cache_metadata(
     cache_data: PagedAttentionCacheData,
     unflat_indices: torch.Tensor,
     flat_indices: torch.Tensor,
-) -> PagedAttentionCacheData:
+):
     """Add the proper metadata to the cache required to perform batch flattening/unflattening
 
     Args:
@@ -280,10 +288,6 @@ def __prepare_cache_metadata_for_flattening(
             the indices used in performing unflattening prior to storing in the cache
         flat_indices: torch.Tensor
             the indices used in performing flattening
-
-    Returns:
-    PagedAttentionCacheData
-        the cache data with proper unflattening metadata included
     """
     cache_data.unflatten_indices = unflat_indices
     cache_data.flatten_indices = flat_indices
@@ -298,8 +302,6 @@ def __prepare_cache_metadata_for_flattening(
     cache_data.block_mapping = apply_index_map(
         cache_data.block_mapping, cache_data.flatten_indices
     )  # n' n_blocks
-
-    return cache_data
 
 
 def __perform_correctness_checks(
@@ -420,6 +422,49 @@ def __prune_candidates(
     return next_vals_split, embeds, parent_sequence_ids
 
 
+def __extract_decode_output(
+    model_output: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    unflat_indices: Optional[torch.Tensor],
+    batch_size: int,
+    n_candidates: int,
+    decode_seq_length: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Extracts the unflattened next tokens and embeds from the model outputs
+
+    Args:
+        model_output: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+            the output from the model (logits, cache tensor, embeds)
+        unflat_indices: torch.Tensor, optional
+            the indices used for unflattening if flattening was applied
+        batch_size: int
+            the original batch size
+        n_candidates: int
+            the number of candidates used
+        decode_seq_length: int
+            the model input length at decode step
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor]
+            the un-flattened next tokens per candidate per sequence, and the un-flattened output embedding vector
+    """
+    logits, _, embeds = model_output  # 1 n' v, 1 n' d  OR  bk 1+h v, bk 1+h d
+    next_vals = torch.argmax(logits, dim=-1)  # 1 n'  OR  bk 1+h
+
+    # If we used batch flattening / tree attention, unflatten the outputs
+    if unflat_indices is not None:
+        next_vals = apply_index_map(next_vals[0], unflat_indices)  # b k 1+h
+        embeds = apply_index_map(embeds[0], unflat_indices)  # b k 1+h d
+    else:
+        next_vals = next_vals.view(
+            batch_size, n_candidates, decode_seq_length
+        )  # b k 1+h
+        embeds = embeds.view(
+            batch_size, n_candidates, decode_seq_length, embeds.size(2)
+        )  # b k 1+h d
+    return next_vals, embeds
+
+
 def speculative_generate(
     model: Union[Callable, torch.nn.Module],
     input_ids: Union[torch.Tensor, List[torch.Tensor]],
@@ -429,7 +474,7 @@ def speculative_generate(
     new_tokens: int = 256,
     n_candidates: int = 5,
     threshes=[5, 3, 2],
-    flatting=True,
+    flattening: bool = True,
     decode_model: Optional[Union[Callable, torch.nn.Module]] = None,
     # todo: This is a WIP to enable cudagraphs, currently its only for batch_size=1
     cudagraphs: bool = False,
@@ -455,7 +500,7 @@ def speculative_generate(
         threshes: build candidate suffix trees by taking top-(threshes[n]) most confident values
             for head n. len(threshes) must equal speculator.n_predict. prod(threshes) must be greater
             than or equal to n_candidates (we cannot have more candidates than tree leaves).
-        flatting: enable batch flattening / tree attention with redundant prefix removal when compression
+        flattening: enable batch flattening / tree attention with redundant prefix removal when compression
             ratio is favorable. Adds extra overhead to shrink the token count in each batch.
         decode_model: nn.Module, optional
             an optional model that performs the decode forward step. If None, will use the function or nn.Module
@@ -474,7 +519,7 @@ def speculative_generate(
         decode_model = model
     bsize = len(input_ids)
 
-    if cudagraphs and (flatting or bsize != 1):
+    if cudagraphs and (flattening or bsize != 1):
         raise NotImplementedError(
             "cudagraphs is not yet supported for batch sizes greater than 1 or flatting"
         )
@@ -532,61 +577,37 @@ def speculative_generate(
         ).int()  # b k 1+h
 
         # Apply batch flattening / tree attention if compression is good enough
-        perform_batch_flattening = False
-        if flatting:
-            (
-                perform_batch_flattening,
-                flat_inputs,
-                unflat_indices,
-                flat_indices,
-            ) = __conditionally_remove_redundant_tokens(input_ids)
-
-            # If batch is flattened, flatten corresponding metadata too
-            if perform_batch_flattening:
-                cache_data = __prepare_cache_metadata_for_flattening(
-                    cache_data, unflat_indices, flat_indices
-                )
+        model_input_ids, unflat_indices, flat_indices = __maybe_flatten(
+            input_ids, cache_data, flattening
+        )
 
         # todo: This is a WIP to enable cudagraphs, currently its only for batch_size=1
         # cudagraph requires static shapes
         if cudagraphs:
-            cache_data.block_mapping = __right_pad_zeros(
-                cache_data.block_mapping, block_mapping_max
-            )
+            __right_pad_cache_block_mapping(cache_data, block_mapping_max)
 
         ############### Execute Decode ###############
 
         # Base model forward pass
         output = decode_model(
-            flat_inputs if perform_batch_flattening else input_ids.view(-1, inp_len),
+            model_input_ids,
             cache_data=cache_data,
             return_embeds=True,
             use_cache=True,
         )  # 1 n' v  OR  bk 1+h v
 
-        logits, _, embeds = output  # 1 n' v, 1 n' d  OR  bk 1+h v, bk 1+h d
-        next_vals = torch.argmax(logits, dim=-1)  # 1 n'  OR  bk 1+h
-
-        # If we used batch flattening / tree attention, unflatten the outputs
-        if perform_batch_flattening:
-            next_vals = apply_index_map(next_vals[0], unflat_indices)  # b k 1+h
-            embeds = apply_index_map(embeds[0], unflat_indices)  # b k 1+h d
-        else:
-            next_vals = next_vals.view(bsize, n_candidates, inp_len)  # b k 1+h
-            embeds = embeds.view(
-                bsize, n_candidates, inp_len, embeds.size(2)
-            )  # b k 1+h d
-
         ############### Process Decode Outputs ###############
+
+        next_vals, embeds = __extract_decode_output(
+            output, unflat_indices, bsize, n_candidates, inp_len
+        )
 
         next_vals_list, embeds, parent_sequence_ids = __prune_candidates(
             input_ids, next_vals, embeds, kv_cache_manager, child_sequence_ids_list
         )
 
         # Update results
-        result = [
-            torch.cat((result[i], next_vals_list[i]), dim=0) for i in range(bsize)
-        ]
+        result = [torch.cat(x, dim=0) for x in zip(result, next_vals_list)]
         input_ids = torch.stack([line[-1:] for line in next_vals_list], dim=0)  # b 1
 
         # update number of generated tokens per sequence
@@ -610,6 +631,23 @@ def __right_pad_zeros(input_tensor: torch.Tensor, max_length: int) -> torch.Tens
             )
             for i in range(input_tensor.size(0))
         ]
+    )
+
+
+def __right_pad_cache_block_mapping(
+    cache_data: PagedAttentionCacheData, block_mapping_max: int
+):
+    """
+    right pad the block mapping when cudagraphs is enabled
+
+    Args:
+        cache_data: PagedAttentionCacheData
+            the paged-attention cache data
+        block_mapping_max: int
+            the maximum number of blocks per sequence required to complete generation
+    """
+    cache_data.block_mapping = __right_pad_zeros(
+        cache_data.block_mapping, block_mapping_max
     )
 
 
