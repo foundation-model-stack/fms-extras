@@ -459,7 +459,8 @@ def speculative_generate(
             ratio is favorable. Adds extra overhead to shrink the token count in each batch.
         decode_model: nn.Module, optional
             an optional model that performs the decode forward step. If None, will use the function or nn.Module
-            provided to model param to perform decode forward. (default is None)
+            provided to model param to perform decode forward. This parameter is intended to be used when the compile
+            flags for the model doing prefill and the model generating subsequent tokens are different (default is None)
         cudagraphs: bool
             if True, cudagraphs is used and all metadata will be padded, otherwise metadata will not be padded unless
             required. Note: This is a WIP and only works for batch_size=1
