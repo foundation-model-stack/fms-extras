@@ -73,7 +73,7 @@ def __allocate_candidate_sequences(
             the number of child candidates to create for each sequence
 
     Returns:
-    Tuple[PagedAttentionCacheData, List[List[int]], List[int]]
+    Tuple[PagedAttentionCacheData, List[List[int]]]
         the cache data created after allocation, and the list of child sequences per parent
     """
     child_sequence_ids_list = []
