@@ -111,6 +111,19 @@ def __prepare_candidate_sequences_cache_data(
 def __conditionally_remove_redundant_tokens(
     input_ids: torch.Tensor,
 ) -> Tuple[bool, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Remove redundant tokens if compression ratio of data is below 0.75
+
+    Args:
+        input_ids: torch.Tensor
+            the input ids for a given decode step
+
+    Returns:
+        Tuple[bool, torch.Tensor, torch.Tensor, torch.Tensor]
+            a boolean denoting whether flattening should be performed, a tensor of the input_ids to be sent to decode
+            model, a tensor of the indices for performing the unflattening operation, a tensor of indices for performing
+            the flattening operation
+    """
     # flatten the batch
     flat_inputs, unflat_indices, flat_indices = flatten_batch(
         input_ids
@@ -368,6 +381,26 @@ def __prune_candidates(
     kv_cache_manager: PagedKVCacheManager,
     child_sequence_ids_list: List[List[int]],
 ) -> Tuple[List[torch.Tensor], torch.Tensor, List[int]]:
+    """
+    Finds the correct set of candidates as well and get their respective next tokens and embeds
+
+    Args:
+        input_ids: torch.Tensor
+            the original input ids unflattened
+        next_vals: torch.Tensor
+            a tensor of the next tokens
+        embeds: torch.Tensor
+            the output embeddings for the best guesses
+        kv_cache_manager: PagedKVCacheManager
+            the paged kv-cache manager
+        child_sequence_ids_list: List[List[int]]
+            the list of child sequences per parent
+
+    Returns:
+        Tuple[List[torch.Tensor], torch.Tensor, List[int]]
+            a list of tensor of the correct tokens per sequence, and a tensor of the correct embeddings, and a list of
+            the best candidate id per sequence
+    """
     # Check correctness of speculator predictions
     next_vals, embeds, n_correct, best_guess = __perform_correctness_checks(
         input_ids, next_vals, embeds
