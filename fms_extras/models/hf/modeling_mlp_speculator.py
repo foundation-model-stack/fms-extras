@@ -1,57 +1,10 @@
-import os
-from typing import List, OrderedDict
+from typing import List, Optional
 
 import torch
+from fms.models.hf import _fms_to_hf_adapt_map
 from transformers import PretrainedConfig, PreTrainedModel
 
 from fms_extras.models.speculator import MLPSpeculator
-
-
-def load_from_fms_weights(
-    weights: OrderedDict,
-    n_predict: int,
-    top_k_tokens_per_head: List[int],
-    n_candidates: int,
-    emb_dim: int = 0,
-) -> "MLPSpeculatorPreTrainedModel":
-    """
-    Convenience function for loading from fms MLPSpeculator
-
-    Args:
-        weights: OrderedDict
-            the weights
-        n_predict: int
-            number of lookaheads for speculator
-        top_k_tokens_per_head: List[int]
-            Number of tokens to consider from each head when forming the candidate tree.
-            For each candidate branch in the tree, head n produces topk[n] additional sub-branches.
-        n_candidates: int
-            number of child candidates to create per sequence
-        emb_dim: int
-            if 0 will set emb_dim to inner_dim, otherwise emb_dim and inner_dim will differ in model
-
-    Returns:
-        MLPSpeculatorPreTrainedModel
-            a huggingface MLPSpeculator
-    """
-
-    vocab_size = weights["emb.0.weight"].size(0)
-    inner_dim = weights["emb.0.weight"].size(1)
-    if emb_dim == 0:
-        emb_dim = inner_dim
-
-    config = MLPSpeculatorConfig(
-        vocab_size=vocab_size,
-        emb_dim=emb_dim,
-        inner_dim=inner_dim,
-        n_predict=n_predict,
-        top_k_tokens_per_head=top_k_tokens_per_head,
-        n_candidates=n_candidates,
-    )
-
-    hf_mlp_speculator = MLPSpeculatorPreTrainedModel(config)
-    hf_mlp_speculator.load_state_dict(weights)
-    return hf_mlp_speculator
 
 
 class MLPSpeculatorConfig(PretrainedConfig):
@@ -99,14 +52,16 @@ class MLPSpeculatorConfig(PretrainedConfig):
         super().__init__(**kwargs)
 
 
-class MLPSpeculatorPreTrainedModel(MLPSpeculator, PreTrainedModel):
+class MLPSpeculatorPreTrainedModel(PreTrainedModel):
     """
     Hugginface MLPSpeculator which provides loading/saving in huggingface
     """
 
     config_class = MLPSpeculatorConfig
 
-    def __init__(self, config: MLPSpeculatorConfig):
+    def __init__(
+        self, config: MLPSpeculatorConfig, speculator: Optional[MLPSpeculator] = None
+    ):
         super().__init__(
             config=config,
             emb_dim=config.emb_dim,
@@ -114,3 +69,94 @@ class MLPSpeculatorPreTrainedModel(MLPSpeculator, PreTrainedModel):
             vocab_size=config.vocab_size,
             n_predict=config.n_predict,
         )
+        if speculator is None:
+            self.speculator = MLPSpeculator(
+                config.emb_dim, config.inner_dim, config.vocab_size, config.n_predict
+            )
+            self.speculator.reset_parameters()
+        else:
+            self.speculator = speculator
+
+    @classmethod
+    def from_fms_model(
+        cls,
+        model: MLPSpeculator,
+        top_k_tokens_per_head: List[int],
+        n_candidates: int,
+        *args,
+        **kwargs
+    ):
+        config = MLPSpeculatorConfig(
+            vocab_size=model.vsize,
+            emb_dim=model.emb_dim,
+            inner_dim=model.inner_dim,
+            n_predict=model.n_predict,
+            top_k_tokens_per_head=top_k_tokens_per_head,
+            n_candidates=n_candidates,
+        )
+        return cls(config, model)
+
+    def generate_suffixes(
+        self,
+        state: torch.Tensor,
+        ind: torch.Tensor,
+        topk: List[int] = [5, 4, 3],
+        n: int = 5,
+    ) -> torch.Tensor:
+        """
+        FOR INFERENCE
+        Generate tree of candidate sequences.
+        ...
+        Args
+        ----
+        state : torch.Tensor
+            Most recent embedding vector from the base model (pre-classification head).
+            Expects size [b 1 d] where b is batch size and d is model width.
+        ind : torch.Tensor
+            Token indices of the base model's most recent predicted token(s).
+            Expects size [b 1] where b is batch size.
+        topk : List(int)
+            Number of tokens to consider from each head when forming the candidate tree.
+            For each candidate branch in the tree, head n produces topk[n] additional sub-branches.
+        n : int
+            Given the final tree of prod(topk) candidates, return only the top n most confident.
+        ...
+        Output : torch.Tensor
+            The tensor of most likely candidate sequences.
+            Has size [b n self.n_predict], where b is batch size and n is provided above.
+        """
+        return self.speculator.generate_suffixes(state, ind, topk, n)
+
+    def forward(
+        self,
+        state: torch.Tensor,
+        inds: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        FOR TRAINING
+        A parallel forward pass on pre-existing ground-truth tokens in pretraining contexts.
+        Produces self.n_predict predicted tokens for each token embedding in state.
+        Inds requires self.n_predict extra tokens on the right to "simulate" recursive
+        behavior for end positions.
+        ...
+        Args
+        ----
+        state : torch.Tensor
+            Embedding vectors from the base model for a given sequence.
+            Expects size [b n d] where b is batch size, n is seq len, and d is model width.
+        inds : torch.Tensor
+            Ground-truth token indices. inds[:,i] is the prediction coming from state[:,i]
+            (or the legal fiction ground truth corresponding to that prediction).
+            Expects size [b n+self.n_predict].
+        ...
+        Output : torch.Tensor
+            Prediction logits at each position, for each head of the speculator.
+            Has size [self.n_predict b n v] where v is vocab size.
+        """
+        return self.speculator(state, inds)
+
+    def reset_parameters(self):
+        self.speculator.reset_parameters()
+
+
+_fms_to_hf_adapt_map[MLPSpeculator] = MLPSpeculatorPreTrainedModel

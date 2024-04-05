@@ -1,6 +1,8 @@
 import tempfile
 
 import torch
+from fms.models.hf import to_hf_api
+from transformers import PreTrainedModel
 
 from fms_extras.models.hf.modeling_mlp_speculator import (
     MLPSpeculatorConfig,
@@ -13,12 +15,21 @@ from fms_extras.models.speculator import MLPSpeculator
 def __test_speculator_equivalence(
     speculator_1, speculator_2, emb_dim, top_k_tokens_per_head, n_candidates
 ):
+    sd1_is_hf = isinstance(speculator_1, PreTrainedModel)
+    sd2_is_hf = isinstance(speculator_2, PreTrainedModel)
     sd1 = speculator_1.state_dict()
     sd2 = speculator_2.state_dict()
     # make sure state dicts are same
     assert len(sd1) == len(sd2)
     for k in sd1.keys():
-        torch.testing.assert_close(sd1[k], sd2[k])
+        sd1_key = k
+        if sd1_is_hf and not sd2_is_hf:
+            sd2_key = sd1_key.replace("speculator.", "")
+        elif sd2_is_hf and not sd1_is_hf:
+            sd2_key = f"speculator.{sd1_key}"
+        else:
+            sd2_key = sd1_key
+        torch.testing.assert_close(sd1[sd1_key], sd2[sd2_key])
 
     # make sure generate_suffixes produce same output
     state = torch.rand(4, 1, emb_dim)
@@ -43,12 +54,13 @@ def test_load_from_fms_weights():
     )
     speculator.reset_parameters()
     speculator.eval()
-    original_sd = speculator.state_dict()
 
     top_k_tokens_per_head = [5, 3, 2, 2]
     n_candidates = 5
-    hf_speculator = load_from_fms_weights(
-        original_sd, n_predict, top_k_tokens_per_head, n_candidates, emb_dim
+    hf_speculator = to_hf_api(
+        speculator,
+        top_k_tokens_per_head=top_k_tokens_per_head,
+        n_candidates=n_candidates,
     )
     hf_speculator.eval()
 

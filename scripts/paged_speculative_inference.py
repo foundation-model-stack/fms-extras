@@ -162,7 +162,7 @@ if args.speculator_path is not None:
 
         speculator = MLPSpeculatorPreTrainedModel.from_pretrained(
             args.speculator_path, device_map=device
-        )
+        ).speculator
     else:
         print("speculator format must be one of fms or hf")
         exit()
