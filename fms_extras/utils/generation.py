@@ -19,7 +19,7 @@ def __execute_prefill(
     """Execute the prefill and return information needed for first prediction.
 
     By prefill, we are referring to the initial forward pass on the prompt tokens prior
-    to any tokens being added to the cache
+    to any computed keys/values added to the cache
 
     Args:
         model: Union[nn.Module, Callable]
@@ -211,13 +211,13 @@ def __free_incorrect_tokens_and_sequences(
     return parent_sequence_ids
 
 
-def __perform_correctness_checks(
+def __get_best_candidates(
     input_ids: torch.Tensor,
     next_vals: torch.Tensor,
     embeds: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Check for the correctness of speculator predictions and get the indices of the
+    Find the candidates with the best speculator predictions and get the indices of the
     best candidates, the number of tokens correct, and the base model output values
     for that candidate (tokens and embeddings)
 
@@ -231,9 +231,10 @@ def __perform_correctness_checks(
 
     Returns:
     Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
-        a tensor of the next tokens per best guess, a tensor of the embeds per best
-        guess, a tensor of the number of correct tokens per best guess, and a tensor
-        containing the best guess amongst all candidates per sequence
+        a tensor of the next tokens per best guess (b x 1+h), a tensor of the embeds
+        per best guess (b x 1+h x d), a tensor of the number of correct tokens per
+        best guess (b), and a tensor containing the best guess amongst all candidates
+        per sequence (b)
     """
     batch_size, num_candidates_per_sequence, decode_seq_length = input_ids.shape
 
@@ -313,8 +314,8 @@ def __prune_candidates(
             a list of tensor of the correct tokens per sequence, and a tensor of the
             correct embeddings, and a list of the best candidate id per sequence
     """
-    # Check correctness of speculator predictions
-    next_vals, embeds, n_correct, best_guess = __perform_correctness_checks(
+    # get the best candidates
+    next_vals, embeds, n_correct, best_guess = __get_best_candidates(
         input_ids, next_vals, embeds
     )
 
@@ -507,7 +508,7 @@ def speculative_generate(
         # todo: This is a WIP to enable cudagraphs, currently its only for batch_size=1
         # cudagraph requires static shapes
         if cudagraphs:
-            __right_pad_cache_block_mapping(cache_data, block_mapping_max)
+            cache_data.apply_right_padding_to_block_mapping(block_mapping_max)
 
         # Base model forward pass
         output = decode_model(
@@ -539,30 +540,6 @@ def speculative_generate(
     kv_cache_manager.free_sequences(parent_sequence_ids, recursive=True)
 
     return result, n_steps, ttft, (time.time() - start_time)
-
-
-def __right_pad_cache_block_mapping(
-    cache_data: PagedAttentionCacheData, block_mapping_max: int
-):
-    """
-    right pad the block mapping when cudagraphs is enabled
-
-    Args:
-        cache_data: PagedAttentionCacheData
-            the paged-attention cache data
-        block_mapping_max: int
-            the maximum number of blocks per sequence required to complete generation
-    """
-    block_mapping = cache_data.block_mapping
-    cache_data.block_mapping = torch.stack(
-        [
-            F.pad(
-                block_mapping[i],
-                (0, block_mapping_max - block_mapping.size(1)),
-            )
-            for i in range(block_mapping.size(0))
-        ]
-    )
 
 
 def __create_prefill_mask(
@@ -665,7 +642,9 @@ def paged_generate(
         else:
             # cudagraph requires static shapes
             if cudagraphs:
-                __right_pad_cache_block_mapping(kwargs["cache_data"], block_mapping_max)
+                kwargs["cache_data"].apply_right_padding_to_block_mapping(
+                    block_mapping_max
+                )
 
             logits, _ = decode_model(input_ids, **kwargs)
         logits = logits[:, -1, :]

@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Tuple, Union
 import torch
 import torch._inductor.ir as ir
 import torch._inductor.lowering as lowering
+import torch.nn.functional as F
 from torch._dynamo import mark_static_address
 from torch._inductor.virtualized import V
 
@@ -615,6 +616,24 @@ class PagedAttentionCacheData:
             self.block_mapping, self.flatten_indices
         )  # n' n_blocks
 
+    def apply_right_padding_to_block_mapping(self, block_mapping_max: int):
+        """
+        right pad the block mapping when cudagraphs is enabled
+
+        Args:
+            block_mapping_max: int
+                the maximum number of blocks per sequence required to complete generation
+        """
+        self.block_mapping = torch.stack(
+            [
+                F.pad(
+                    self.block_mapping[i],
+                    (0, block_mapping_max - self.block_mapping.size(1)),
+                )
+                for i in range(self.block_mapping.size(0))
+            ]
+        )
+
 
 def get_cache_block_size(block_size, head_size, num_heads, num_layers, dtype) -> int:
     kv_cache_block_size = block_size * num_heads * head_size * 2  # 2 for k and v
@@ -1142,7 +1161,9 @@ class PagedKVCacheManager:
         context_lengths_tensor = torch.tensor(
             context_lengths, dtype=torch.int, device=self.device
         )
-
+        query_length = (
+            0 if max_num_tokens_per_sequence is None else max_num_tokens_per_sequence
+        )
         return PagedAttentionCacheData(
             data=self.cache,
             max_sequence_length=max_sequence_length,
@@ -1157,9 +1178,7 @@ class PagedKVCacheManager:
             head_size=self.head_size,
             is_generating=not is_prompt,
             sequence_ids=sequence_ids,
-            query_length=0
-            if max_num_tokens_per_sequence is None
-            else max_num_tokens_per_sequence,
+            query_length=query_length,
         )
 
     def allocate_tokens(
