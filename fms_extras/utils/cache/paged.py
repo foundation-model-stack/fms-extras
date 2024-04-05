@@ -561,6 +561,8 @@ class PagedAttentionCacheData:
 
         [19, 20, 21, 22, 63, 64, 65, 66]
 
+        Note: when this operation is done multiple times, the output will change
+
         Args:
             cache_data: PagedAttentionCacheData
                 the cache data created after allocation
