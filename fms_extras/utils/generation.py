@@ -16,17 +16,22 @@ def __execute_prefill(
     cache_data: PagedAttentionCacheData,
     max_seq_len: int,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Execute the prefill and return information needed for first prediction
+    """Execute the prefill and return information needed for first prediction.
+
+    By prefill, we are referring to the initial forward pass on the prompt tokens prior
+    to any tokens being added to the cache
 
     Args:
         model: Union[nn.Module, Callable]
             A function or nn.Module that takes a batch of input_ids and returns logits
         input_ids: Union[torch.Tensor, List[torch.Tensor]]
-            list of prompts where each tensor in the list corresponds to a single prompt in the batch
+            list of prompts where each tensor in the list corresponds to a single prompt
+            in the batch
         cache_data: PagedAttentionCacheData
             the paged attention kv-cache data for prefill
         max_seq_len: int
-            max length that base model can handle accounting for upcoming speculated tokens
+            max length that base model can handle accounting for upcoming speculated
+            tokens
 
     Returns:
     Tuple[torch.Tensor, torch.Tensor]
@@ -69,8 +74,9 @@ def __prepare_candidate_sequences_cache_data(
     num_candidates_per_sequence: int,
 ) -> Tuple[PagedAttentionCacheData, List[List[int]]]:
     """
-    Speculative generate produces suffix candidates for each sequence. This method allocates these candidates in the
-    kv-cache as child sequences (sequences referencing their parents as a prefix optimized for better memory efficiency
+    Speculative generate produces suffix candidates for each sequence. This method
+    allocates these candidates in the kv-cache as child sequences (sequences
+    referencing their parents as a prefix optimized for better memory efficiency
     with less duplication)
 
     Args:
@@ -79,13 +85,15 @@ def __prepare_candidate_sequences_cache_data(
         parent_sequence_ids: List[int]
             the parent sequence ids associated with each prompt in the batch
         model_input_lengths: List[int]
-            list where each value corresponds the number of tokens in the prompt at that index
+            list where each value corresponds the number of tokens in the prompt at
+            that index
         num_candidates_per_sequence: int
             the number of child candidates to create for each sequence
 
     Returns:
     Tuple[PagedAttentionCacheData, List[List[int]]]
-        the cache data created after allocation, and the list of child sequences per parent
+        the cache data created after allocation, and the list of child sequences
+        per parent
     """
     child_sequence_ids_list = []
     child_sequence_ids_flattened = []
@@ -103,7 +111,7 @@ def __prepare_candidate_sequences_cache_data(
     )
 
     # Set up kv cache metadata for paged memory access over tokens/candidates with shared prefixes
-    __apply_batch_expansion_to_cache_metadata(cache_data)
+    cache_data.apply_batch_expansion()
 
     return cache_data, child_sequence_ids_list
 
@@ -126,8 +134,9 @@ def __maybe_flatten(
 
     Returns:
         Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]
-            a tensor of the input_ids to be sent to decode model, an optional tensor of the indices for performing the
-            un-flattening operation if redundant tokens are being removed, an optional tensor of indices for performing
+            a tensor of the input_ids to be sent to decode model, an optional tensor
+            of the indices for performing the un-flattening operation if redundant
+            tokens are being removed, an optional tensor of indices for performing
             the flattening operation if redundant tokens are being removed
     """
     if not flattening:
@@ -145,8 +154,7 @@ def __maybe_flatten(
     # set the correct input_ids to return if compression ratio satisfied
     if perform_batch_flattening:
         result_input_ids = flat_inputs[None,]  # 1 n'
-
-        __apply_flattening_to_cache_metadata(cache_data, unflat_indices, flat_indices)
+        cache_data.apply_batch_flattening(unflat_indices, flat_indices)
     else:
         result_input_ids = input_ids.view(-1, input_ids.size(2))
         unflat_indices = None  # type: ignore
@@ -163,8 +171,9 @@ def __free_incorrect_tokens_and_sequences(
     decode_seq_length: int,
 ) -> List[int]:
     """
-    Free all non-best candidate sequences from the kv-cache and for best candidate sequences, logically remove tokens
-    based on the number of incorrect tokens generated
+    Free all non-best candidate sequences from the kv-cache and for best candidate
+    sequences, logically remove tokens based on the number of incorrect tokens
+    generated
 
     Args:
         kv_cache_manager: PagedKVCacheManager
@@ -174,7 +183,8 @@ def __free_incorrect_tokens_and_sequences(
         best_guess: torch.Tensor
             a tensor containing the best candidate per sequence in the batch
         n_correct: torch.Tensor
-            a tensor containing the number of correct tokens best candidate in the batch
+            a tensor containing the number of correct tokens best candidate in the
+            batch
         decode_seq_length: int
             the model input length at decode step
 
@@ -201,117 +211,15 @@ def __free_incorrect_tokens_and_sequences(
     return parent_sequence_ids
 
 
-def __apply_batch_expansion_to_cache_metadata(
-    cache_data: PagedAttentionCacheData,
-):
-    """
-    When performing paged attention, the kernels require that the sequence length be of size 1. In typical generation,
-    this is fine as only 1 token is ever being sent into the model for each sequence in the batch, however for
-    speculative decoding, n tokens are sent for each sequence in the batch where n is the number of predictions.
-
-    To properly run paged attention with the larger sequence length, we must expand the sequence into the batch
-    dimension, and modify the cache metadata to reflect this.
-
-    example:
-
-    model_input_lengths: [4, 4]
-
-    before expansion:
-
-    block_mapping -
-
-    [
-      [1, 2],
-      [10, 11, 12, 13]
-    ]
-
-    context_lengths -
-
-    [22, 66]
-
-    after expansion:
-
-    block_mapping -
-
-    [
-        [1, 2],
-        [1, 2],
-        [1, 2],
-        [1, 2],
-        [10, 11, 12],
-        [10, 11, 12],
-        [10, 11, 12, 13],
-        [10, 11, 12, 13],
-    ]
-
-    context_lengths -
-
-    [19, 20, 21, 22, 63, 64, 65, 66]
-
-    Args:
-        cache_data: PagedAttentionCacheData
-            the cache data created after allocation
-    """
-    # Set up kv cache metadata for paged memory access over tokens/candidates with shared prefixes
-    context_lengths = cache_data.context_lengths  # bk
-    inflate_factor = (
-        cache_data.query_length
-        if cache_data.unflatten_indices is None
-        else cache_data.unflatten_indices.size(-1)
-    )
-    # no reason to check type here as generation allocation always returns context_lengths
-    context_lengths = context_lengths.unsqueeze(1).expand(  # type: ignore
-        -1, inflate_factor
-    )  # bk n
-    # subtract arange(inp_len) to get lengths for each token in candidates
-    cache_data.context_lengths = (
-        context_lengths.sub(context_lengths.sign().cumsum(1).flip([1]).sub(1))
-        .int()
-        .view(-1)
-    )  # bkn
-    cache_data.block_mapping = cache_data.block_mapping.repeat_interleave(
-        inflate_factor, dim=0
-    )  # bkn n_blocks
-
-
-def __apply_flattening_to_cache_metadata(
-    cache_data: PagedAttentionCacheData,
-    unflat_indices: torch.Tensor,
-    flat_indices: torch.Tensor,
-):
-    """Add the proper metadata to the cache required to perform batch flattening/unflattening
-
-    Args:
-        cache_data: PagedAttentionCacheData
-            the paged attention cache data / metadata
-        unflat_indices: torch.Tensor
-            the indices used in performing unflattening prior to storing in the cache
-        flat_indices: torch.Tensor
-            the indices used in performing flattening
-    """
-    cache_data.unflatten_indices = unflat_indices
-    cache_data.flatten_indices = flat_indices
-    cache_data.position_ids = apply_index_map(
-        cache_data.position_ids.view(-1), flat_indices
-    )[
-        None,
-    ]
-    cache_data.context_lengths = apply_index_map(
-        cache_data.context_lengths, cache_data.flatten_indices  # type: ignore
-    )  # n'
-    cache_data.block_mapping = apply_index_map(
-        cache_data.block_mapping, cache_data.flatten_indices
-    )  # n' n_blocks
-
-
 def __perform_correctness_checks(
     input_ids: torch.Tensor,
     next_vals: torch.Tensor,
     embeds: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Check for the correctness of speculator predictions and get the indices of the best candidates, the number of tokens
-    correct, and the base model output values for that candidate (tokens and embeddings)
+    Check for the correctness of speculator predictions and get the indices of the
+    best candidates, the number of tokens correct, and the base model output values
+    for that candidate (tokens and embeddings)
 
     Args:
         input_ids: torch.Tensor
@@ -323,8 +231,9 @@ def __perform_correctness_checks(
 
     Returns:
     Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
-        a tensor of the next tokens per best guess, a tensor of the embeds per best guess, a tensor of the number of
-        correct tokens per best guess, and a tensor containing the best guess amongst all candidates per sequence
+        a tensor of the next tokens per best guess, a tensor of the embeds per best
+        guess, a tensor of the number of correct tokens per best guess, and a tensor
+        containing the best guess amongst all candidates per sequence
     """
     batch_size, num_candidates_per_sequence, decode_seq_length = input_ids.shape
 
@@ -351,8 +260,8 @@ def __get_correct_tokens(
     next_vals: torch.Tensor, n_correct: torch.Tensor, embeds: torch.Tensor
 ) -> Tuple[List[torch.Tensor], torch.Tensor]:
     """
-    extract the correct tokens and the last correct embedding from each candidate, to be used to start the next set
-    of speculative candidates
+    extract the correct tokens and the last correct embedding from each candidate, to
+    be used to start the next set of speculative candidates
 
     Args:
         next_vals: torch.Tensor
@@ -384,7 +293,8 @@ def __prune_candidates(
     child_sequence_ids_list: List[List[int]],
 ) -> Tuple[List[torch.Tensor], torch.Tensor, List[int]]:
     """
-    Finds the correct set of candidates as well and get their respective next tokens and embeds
+    Finds the correct set of candidates as well and get their respective next tokens
+    and embeds
 
     Args:
         input_ids: torch.Tensor
@@ -400,8 +310,8 @@ def __prune_candidates(
 
     Returns:
         Tuple[List[torch.Tensor], torch.Tensor, List[int]]
-            a list of tensor of the correct tokens per sequence, and a tensor of the correct embeddings, and a list of
-            the best candidate id per sequence
+            a list of tensor of the correct tokens per sequence, and a tensor of the
+            correct embeddings, and a list of the best candidate id per sequence
     """
     # Check correctness of speculator predictions
     next_vals, embeds, n_correct, best_guess = __perform_correctness_checks(
@@ -446,7 +356,8 @@ def __extract_decode_output(
 
     Returns:
         Tuple[torch.Tensor, torch.Tensor]
-            the un-flattened next tokens per candidate per sequence, and the un-flattened output embedding vector
+            the un-flattened next tokens per candidate per sequence, and the
+            un-flattened output embedding vector
     """
     logits, _, embeds = model_output  # 1 n' v, 1 n' d  OR  bk 1+h v, bk 1+h d
     next_vals = torch.argmax(logits, dim=-1)  # 1 n'  OR  bk 1+h
@@ -483,32 +394,44 @@ def speculative_generate(
     A reference implementation of speculative decoding generation.
     Returns at least the specified number of tokens - the speculator may return a
     few extra in the final step.
-    If input is batched, continues generating until EVERY sequence has produced AT LEAST the required number of tokens.
-    Input (and output) tokens beyond max_seq_len are simply dropped for a sliding-window approach.
-    Currently reproduces behavior of greedy decoding only.
+    If input is batched, continues generating until EVERY sequence has produced
+    AT LEAST the required number of tokens. Input (and output) tokens beyond
+    max_seq_len are simply dropped for a sliding-window approach. Currently
+    reproduces behavior of greedy decoding only.
+
     Args:
         model: A function or nn.Module that takes a batch of input_ids and
             returns logits
         input_ids: A length n tensor of token IDs, or list of such tensors
-        speculator: A function or nn.Module that takes a state vector and sampled token
-            and returns a set of candidate suffixes
+        speculator: A function or nn.Module that takes a state vector and
+            sampled token and returns a set of candidate suffixes
         kv_cache_manager: PagedKVCacheManager
             the paged kv-cache manager to be used in generation
         max_seq_len: the sequence length of the base model
         new_tokens: number of tokens to generate
-        n_candidates: only consider the top n most confident candidates from the speculator
-        threshes: build candidate suffix trees by taking top-(threshes[n]) most confident values
-            for head n. len(threshes) must equal speculator.n_predict. prod(threshes) must be greater
-            than or equal to n_candidates (we cannot have more candidates than tree leaves).
-        flattening: enable batch flattening / tree attention with redundant prefix removal when compression
-            ratio is favorable. Adds extra overhead to shrink the token count in each batch.
+        n_candidates: only consider the top n most confident candidates
+            from the speculator
+        threshes: build candidate suffix trees by taking top-(threshes[n]) most
+            confident values for head n. len(threshes) must equal speculator.n_predict.
+            prod(threshes) must be greater than or equal to n_candidates (we cannot
+            have more candidates than tree leaves).
+        flattening: enable batch flattening / tree attention with redundant prefix
+            removal when compression ratio is favorable. Adds extra overhead to
+            shrink the token count in each batch.
         decode_model: nn.Module, optional
-            an optional model that performs the decode forward step. If None, will use the function or nn.Module
-            provided to model param to perform decode forward. This parameter is intended to be used when the compile
-            flags for the model doing prefill and the model generating subsequent tokens are different (default is None)
+            an optional model that performs the decode forward step. If None,
+            will use the function or nn.Module provided to model param to perform
+            decode forward. This parameter is intended to be used when the compile
+            flags for the model doing prefill and the model generating subsequent
+            tokens are different (default is None). When we refer to prefill,
+            this is typically the first model pass with the prompt, where the cache
+            has not been filled with any tokens yet. When we refer to decode step,
+            this is typically the forward pass where the cache has been filled with
+            the prompt and is now generating new tokens.
         cudagraphs: bool
-            if True, cudagraphs is used and all metadata will be padded, otherwise metadata will not be padded unless
-            required. Note: This is a WIP and only works for batch_size=1
+            if True, cudagraphs is used and all metadata will be padded, otherwise
+            metadata will not be padded unless required. Note: This is a WIP and
+            only works for batch_size=1
     Returns:
         result: List of id tensors, possibly different lengths if batching.
         n_steps: Number of foward passes used to generate provided tokens.
@@ -553,14 +476,14 @@ def speculative_generate(
         torch.cat((line, input_id), dim=0)
         for line, input_id in zip(result, list(input_ids))
     ]
+    # block mapping max is the max blocks required for the longest prompt in the batch
+    # this is used in padding the block mapping when using cudagraphs because cudagraphs required static shapes
     block_mapping_max = ((max(prompt_lengths) + new_tokens - 1) // 16) + 1
     model_input_lengths = [inp_len] * (input_ids.size(0) * n_candidates)
 
     # perform decode step
     while min(n_gen) < new_tokens:
         n_steps += 1
-
-        ############### Prepare Inputs for decode ###############
 
         # allocate candidate sequences in cache and get the sequence ids
         cache_data, child_sequence_ids_list = __prepare_candidate_sequences_cache_data(
@@ -586,8 +509,6 @@ def speculative_generate(
         if cudagraphs:
             __right_pad_cache_block_mapping(cache_data, block_mapping_max)
 
-        ############### Execute Decode ###############
-
         # Base model forward pass
         output = decode_model(
             model_input_ids,
@@ -595,8 +516,6 @@ def speculative_generate(
             return_embeds=True,
             use_cache=True,
         )  # 1 n' v  OR  bk 1+h v
-
-        ############### Process Decode Outputs ###############
 
         next_vals, embeds = __extract_decode_output(
             output, unflat_indices, bsize, n_candidates, inp_len
@@ -622,18 +541,6 @@ def speculative_generate(
     return result, n_steps, ttft, (time.time() - start_time)
 
 
-def __right_pad_zeros(input_tensor: torch.Tensor, max_length: int) -> torch.Tensor:
-    return torch.stack(
-        [
-            F.pad(
-                input_tensor[i],
-                (0, max_length - input_tensor.size(1)),
-            )
-            for i in range(input_tensor.size(0))
-        ]
-    )
-
-
 def __right_pad_cache_block_mapping(
     cache_data: PagedAttentionCacheData, block_mapping_max: int
 ):
@@ -646,8 +553,15 @@ def __right_pad_cache_block_mapping(
         block_mapping_max: int
             the maximum number of blocks per sequence required to complete generation
     """
-    cache_data.block_mapping = __right_pad_zeros(
-        cache_data.block_mapping, block_mapping_max
+    block_mapping = cache_data.block_mapping
+    cache_data.block_mapping = torch.stack(
+        [
+            F.pad(
+                block_mapping[i],
+                (0, block_mapping_max - block_mapping.size(1)),
+            )
+            for i in range(block_mapping.size(0))
+        ]
     )
 
 
@@ -751,9 +665,7 @@ def paged_generate(
         else:
             # cudagraph requires static shapes
             if cudagraphs:
-                kwargs["cache_data"].block_mapping = __right_pad_zeros(
-                    kwargs["cache_data"].block_mapping, block_mapping_max
-                )
+                __right_pad_cache_block_mapping(kwargs["cache_data"], block_mapping_max)
 
             logits, _ = decode_model(input_ids, **kwargs)
         logits = logits[:, -1, :]

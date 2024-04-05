@@ -513,6 +513,106 @@ class PagedAttentionCacheData:
         """
         return self.is_generating
 
+    def apply_batch_expansion(self):
+        """
+        When performing paged attention, the kernels require that the sequence length
+        be of size 1. In typical generation, this is fine as only 1 token is ever
+        being sent into the model for each sequence in the batch, however for
+        speculative decoding, n tokens are sent for each sequence in the batch where n
+        is the number of predictions.
+
+        To properly run paged attention with the larger sequence length, we must
+        expand the sequence into the batch dimension, and modify the cache metadata to
+        reflect this.
+
+        example:
+
+        model_input_lengths: [4, 4]
+
+        before expansion:
+
+        block_mapping -
+
+        [
+          [1, 2],
+          [10, 11, 12, 13]
+        ]
+
+        context_lengths -
+
+        [22, 66]
+
+        after expansion:
+
+        block_mapping -
+
+        [
+            [1, 2],
+            [1, 2],
+            [1, 2],
+            [1, 2],
+            [10, 11, 12],
+            [10, 11, 12],
+            [10, 11, 12, 13],
+            [10, 11, 12, 13],
+        ]
+
+        context_lengths -
+
+        [19, 20, 21, 22, 63, 64, 65, 66]
+
+        Args:
+            cache_data: PagedAttentionCacheData
+                the cache data created after allocation
+        """
+        # Set up kv cache metadata for paged memory access over tokens/candidates with shared prefixes
+        context_lengths = self.context_lengths  # bk
+        inflate_factor = (
+            self.query_length
+            if self.unflatten_indices is None
+            else self.unflatten_indices.size(-1)
+        )
+        # no reason to check type here as generation allocation always returns context_lengths
+        context_lengths = context_lengths.unsqueeze(1).expand(  # type: ignore
+            -1, inflate_factor
+        )  # bk n
+        # subtract arange(inp_len) to get lengths for each token in candidates
+        self.context_lengths = (
+            context_lengths.sub(context_lengths.sign().cumsum(1).flip([1]).sub(1))
+            .int()
+            .view(-1)
+        )  # bkn
+        self.block_mapping = self.block_mapping.repeat_interleave(
+            inflate_factor, dim=0
+        )  # bkn n_blocks
+
+    def apply_batch_flattening(
+        self,
+        unflat_indices: torch.Tensor,
+        flat_indices: torch.Tensor,
+    ):
+        """Add the proper metadata to the cache required to perform batch
+        flattening/unflattening
+
+        Args:
+            unflat_indices: torch.Tensor
+                the indices used in performing unflattening prior to storing in the
+                cache
+            flat_indices: torch.Tensor
+                the indices used in performing flattening
+        """
+        self.unflatten_indices = unflat_indices
+        self.flatten_indices = flat_indices
+        self.position_ids = apply_index_map(self.position_ids.view(-1), flat_indices)[
+            None,
+        ]
+        self.context_lengths = apply_index_map(
+            self.context_lengths, self.flatten_indices  # type: ignore
+        )  # n'
+        self.block_mapping = apply_index_map(
+            self.block_mapping, self.flatten_indices
+        )  # n' n_blocks
+
 
 def get_cache_block_size(block_size, head_size, num_heads, num_layers, dtype) -> int:
     kv_cache_block_size = block_size * num_heads * head_size * 2  # 2 for k and v
