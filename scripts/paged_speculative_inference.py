@@ -39,6 +39,13 @@ parser.add_argument(
     help="Path to the checkpoint containing speculator weights (single .pth file, not HF weights)",
 )
 parser.add_argument(
+    "--speculator_source",
+    type=str,
+    default="fms",
+    choices=["hf", "fms"],
+    help="Source format of speculator weights",
+)
+parser.add_argument(
     "--model_source",
     type=str,
     help="Source of the checkpoint. E.g. 'meta', 'hf', None",
@@ -141,12 +148,24 @@ torch.set_grad_enabled(False)
 speculator = None
 if args.speculator_path is not None:
     print("loading speculator")
-    speculator = MLPSpeculator(
-        model.config.emb_dim, 4096, model.config.src_vocab_size, n_predict=3
-    )
-    speculator.load_state_dict(
-        torch.load(args.speculator_path, map_location=device)["model_state"]
-    )
+    if args.speculator_source == "fms":
+        speculator = MLPSpeculator(
+            model.config.emb_dim, 4096, model.config.src_vocab_size, n_predict=3
+        )
+        speculator.load_state_dict(
+            torch.load(args.speculator_path, map_location=device)["model_state"]
+        )
+    elif args.speculator_source == "hf":
+        from fms_extras.models.hf.modeling_mlp_speculator import (
+            MLPSpeculatorPreTrainedModel,
+        )
+
+        speculator = MLPSpeculatorPreTrainedModel.from_pretrained(
+            args.speculator_path, device_map=device
+        )
+    else:
+        print("speculator format must be one of fms or hf")
+        exit()
     speculator = speculator.to(device)
     print("loading complete on rank", local_rank)
 
