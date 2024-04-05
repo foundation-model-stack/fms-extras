@@ -1,5 +1,5 @@
 import math
-from typing import List
+from typing import Dict, List, Tuple
 
 import torch
 import torch.nn as nn
@@ -170,3 +170,89 @@ class MLPSpeculator(nn.Module):
             state = self.activation(self.ln[i](state))  # b n d
             out.append(self.head[i](state))  # b n v
         return torch.stack(out, dim=0)  # h b n v
+
+
+def apply_index_map(
+    inp: torch.Tensor, inds: torch.Tensor, dim: int = 0
+) -> torch.Tensor:
+    """
+    Applies index map to specified dimension of input tensor. Used for batch flattening/unflattening.
+
+    More precisely, takes input of size ([...], n, [...]), with n in the dim-th dimension,
+    and tensor of indices of size (a, ..., z). Using those indices we draw from the input
+    on dimension dim, to create output tensor with size ([...], (a, ..., z), [...]).
+
+    i.e. if dim=0, inp has size (6,3,2), and inds has size (8,4), then:
+    1) max(inds) < 6
+    2) output has size (8,4,3,2)
+    3) the output contains repeated values (8*4 > 6)
+
+    Args:
+        inp: torch.Tensor
+            tensor of inputs
+        inds: torch.Tensor
+            tensor of indices
+        dim: int
+            dimension to index on
+
+    Returns:
+        torch.Tensor
+            output tensor with new size ([...], (a, ..., z), [...])
+    """
+    inds_shape = inds.size()
+    inp_shape = inp.size()
+    out = inp.index_select(dim, inds.view(-1))
+    return out.view(*inp_shape[:dim], *inds_shape, *inp_shape[dim + 1 :])
+
+
+def flatten_batch(inp: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Takes a speculator suffix tree: a bsize x n_candidates x candidate_len rectangular batch
+    of token indices, and flattens it while removing redundant tokens.
+
+    For example, given:
+
+    a b c
+    a b d
+    a e f
+
+    Tokens 'a b' in line 2 and token 'a' in line 3 are functionally equivalent to 'a b' in
+    line 1, so the flattened batch returns `a b c d e f`
+
+    Args:
+        inp: torch.Tensor
+            speculator suffix tree
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+            1) the flattened, pruned input
+            2) a tensor, sized as input, mapping each input token to its slot in output
+            3) a tensor, sized as output, mapping each output token to its slot in the flattened input
+    """
+    unflat_map = torch.zeros_like(inp, dtype=torch.int)
+    inp_list = inp.tolist()
+    flat_map = []
+    batch_offset = 0
+    # Generate the flatten/unflatten maps
+    for b, candidate_set in enumerate(inp_list):
+        lineages: Dict[
+            Tuple[List[int]], int
+        ] = {}  # Prefix : n unique prefixes observed so far
+        for k, candidate in enumerate(candidate_set):
+            for n in range(len(candidate)):
+                lineage = tuple(candidate[: n + 1])
+                if lineage in lineages:
+                    # Token is redundant
+                    unflat_map[b, k, n] = lineages[lineage] + batch_offset
+                else:
+                    # Token is not redundant
+                    unflat_map[b, k, n] = len(lineages) + batch_offset
+                    lineages[lineage] = len(lineages)
+                    flat_map.append(
+                        b * len(candidate_set) * len(candidate) + k * len(candidate) + n
+                    )
+        batch_offset += len(lineages)
+    # Generate the flattened batch
+    flat_map_tensor = torch.tensor(flat_map, device=inp.device, dtype=torch.int32)
+    out = apply_index_map(inp.view(-1), flat_map_tensor, 0)
+    return out, unflat_map, flat_map_tensor
