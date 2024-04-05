@@ -1,22 +1,23 @@
 import tempfile
 
 import torch
+from fms.models import get_model
 from fms.models.hf import to_hf_api
 from transformers import PreTrainedModel
 
 from fms_extras.models.hf.modeling_mlp_speculator import (
     MLPSpeculatorConfig,
     MLPSpeculatorPreTrainedModel,
-    load_from_fms_weights,
 )
 from fms_extras.models.speculator import MLPSpeculator
 
 
 def __test_speculator_equivalence(
-    speculator_1, speculator_2, emb_dim, top_k_tokens_per_head, n_candidates
+    speculator_1, speculator_2, top_k_tokens_per_head, n_candidates
 ):
     sd1_is_hf = isinstance(speculator_1, PreTrainedModel)
     sd2_is_hf = isinstance(speculator_2, PreTrainedModel)
+    emb_dim = speculator_1.config.emb_dim if sd1_is_hf else speculator_1.emb_dim
     sd1 = speculator_1.state_dict()
     sd2 = speculator_2.state_dict()
     # make sure state dicts are same
@@ -44,7 +45,42 @@ def __test_speculator_equivalence(
     torch.testing.assert_close(speculator1_out, speculator2_out)
 
 
-def test_load_from_fms_weights():
+def test_get_model_from_hf():
+    config = MLPSpeculatorConfig(
+        vocab_size=256,
+        emb_dim=64,
+        inner_dim=32,
+        n_predict=4,
+        top_k_tokens_per_head=[5, 3, 2, 2],
+        n_candidates=5,
+    )
+
+    hf_model = MLPSpeculatorPreTrainedModel(config)
+    hf_model.reset_parameters()
+
+    with tempfile.TemporaryDirectory() as workdir:
+        path = f"{workdir}/model_out"
+        hf_model.save_pretrained(path)
+
+        model = get_model(
+            "mlp_speculator",
+            "llama.7b",
+            model_path=path,
+            source="hf",
+            vocab_size=config.vocab_size,
+            emb_dim=config.emb_dim,
+            inner_dim=config.inner_dim,
+            n_predict=config.n_predict,
+        )
+
+        model.eval()
+
+    __test_speculator_equivalence(
+        model, hf_model, config.top_k_tokens_per_head, config.n_candidates
+    )
+
+
+def test_to_hf_api():
     vocab_size = 256
     emb_dim = 64
     inner_dim = 32
@@ -65,7 +101,7 @@ def test_load_from_fms_weights():
     hf_speculator.eval()
 
     __test_speculator_equivalence(
-        speculator, hf_speculator, emb_dim, top_k_tokens_per_head, n_candidates
+        speculator, hf_speculator, top_k_tokens_per_head, n_candidates
     )
 
 
@@ -96,5 +132,5 @@ def test_round_trip():
         loaded_model.eval()
 
     __test_speculator_equivalence(
-        original_model, loaded_model, emb_dim, top_k_tokens_per_head, n_candidates
+        original_model, loaded_model, top_k_tokens_per_head, n_candidates
     )
