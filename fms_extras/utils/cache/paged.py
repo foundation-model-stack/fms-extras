@@ -6,9 +6,11 @@ from typing import Dict, List, Optional, Tuple, Union
 import torch
 import torch._inductor.ir as ir
 import torch._inductor.lowering as lowering
+import torch.nn.functional as F
 from torch._dynamo import mark_static_address
 from torch._inductor.virtualized import V
 
+from fms_extras.models.speculator import apply_index_map
 from fms_extras.paged_c import attn_ops, cache_ops  # type: ignore
 
 
@@ -296,6 +298,9 @@ class PagedAttentionCacheDataLayer:
     kv_heads: int
     head_size: int
     is_generating: bool
+    query_length: int
+    flatten_indices: Optional[torch.Tensor] = None
+    unflatten_indices: Optional[torch.Tensor] = None
 
     def get_cache_type(self) -> str:
         return "paged-attention"
@@ -318,8 +323,22 @@ class PagedAttentionCacheDataLayer:
         Tuple[torch.Tensor, torch.Tensor]
             the updated keys and values to be passed in to attention computation
         """
-        key_to_cache = keys.view(-1, self.kv_heads, self.head_size)
-        value_to_cache = values.view(-1, self.kv_heads, self.head_size)
+        # in the case where the indices have been flattened for performance purposes, we must unflatten them to the
+        # format expected in the reshape_and_cache function
+        if self.unflatten_indices is not None:
+            # inp: n' h d
+            # inds: b k n
+            # if we have a batch, it will be size 1 here, so will need to be removed, otherwise no-op
+            keys = keys.squeeze(0)
+            values = values.squeeze(0)
+
+            keys = apply_index_map(keys, self.unflatten_indices)  # b k n h d
+            values = apply_index_map(values, self.unflatten_indices)
+            key_to_cache = keys.view(-1, *keys.size()[3:])
+            value_to_cache = values.view(-1, *values.size()[3:])  # bkn h d
+        else:
+            key_to_cache = keys.view(-1, self.kv_heads, self.head_size)
+            value_to_cache = values.view(-1, self.kv_heads, self.head_size)
 
         self.data_layer = torch.ops.paged_attention.reshape_and_cache(
             key_to_cache,
@@ -448,6 +467,9 @@ class PagedAttentionCacheData:
     head_size: int
     is_generating: bool
     sequence_ids: List[int]
+    query_length: int
+    flatten_indices: Optional[torch.Tensor] = None
+    unflatten_indices: Optional[torch.Tensor] = None
 
     def get_layer(self, layer_index: int) -> PagedAttentionCacheDataLayer:
         """
@@ -476,6 +498,9 @@ class PagedAttentionCacheData:
             kv_heads=self.kv_heads,
             head_size=self.head_size,
             is_generating=self.is_generating,
+            query_length=self.query_length,
+            flatten_indices=self.flatten_indices,
+            unflatten_indices=self.unflatten_indices,
         )
 
     def is_filled(self) -> bool:
@@ -488,6 +513,126 @@ class PagedAttentionCacheData:
             True if the keys and values for the prompt have been set, otherwise False.
         """
         return self.is_generating
+
+    def apply_batch_expansion(self):
+        """
+        When performing paged attention, the kernels require that the sequence length
+        be of size 1. In typical generation, this is fine as only 1 token is ever
+        being sent into the model for each sequence in the batch, however for
+        speculative decoding, n tokens are sent for each sequence in the batch where n
+        is the number of predictions.
+
+        To properly run paged attention with the larger sequence length, we must
+        expand the sequence into the batch dimension, and modify the cache metadata to
+        reflect this.
+
+        example:
+
+        model_input_lengths: [4, 4]
+
+        before expansion:
+
+        block_mapping -
+
+        [
+          [1, 2],
+          [10, 11, 12, 13]
+        ]
+
+        context_lengths -
+
+        [22, 66]
+
+        after expansion:
+
+        block_mapping -
+
+        [
+            [1, 2],
+            [1, 2],
+            [1, 2],
+            [1, 2],
+            [10, 11, 12],
+            [10, 11, 12],
+            [10, 11, 12, 13],
+            [10, 11, 12, 13],
+        ]
+
+        context_lengths -
+
+        [19, 20, 21, 22, 63, 64, 65, 66]
+
+        Note: when this operation is done multiple times, the output will change
+
+        Args:
+            cache_data: PagedAttentionCacheData
+                the cache data created after allocation
+        """
+        # Set up kv cache metadata for paged memory access over tokens/candidates with shared prefixes
+        context_lengths = self.context_lengths  # bk
+        inflate_factor = (
+            self.query_length
+            if self.unflatten_indices is None
+            else self.unflatten_indices.size(-1)
+        )
+        # no reason to check type here as generation allocation always returns context_lengths
+        context_lengths = context_lengths.unsqueeze(1).expand(  # type: ignore
+            -1, inflate_factor
+        )  # bk n
+        # subtract arange(inp_len) to get lengths for each token in candidates
+        self.context_lengths = (
+            context_lengths.sub(context_lengths.sign().cumsum(1).flip([1]).sub(1))
+            .int()
+            .view(-1)
+        )  # bkn
+        self.block_mapping = self.block_mapping.repeat_interleave(
+            inflate_factor, dim=0
+        )  # bkn n_blocks
+
+    def apply_batch_flattening(
+        self,
+        unflat_indices: torch.Tensor,
+        flat_indices: torch.Tensor,
+    ):
+        """Add the proper metadata to the cache required to perform batch
+        flattening/unflattening
+
+        Args:
+            unflat_indices: torch.Tensor
+                the indices used in performing unflattening prior to storing in the
+                cache
+            flat_indices: torch.Tensor
+                the indices used in performing flattening
+        """
+        self.unflatten_indices = unflat_indices
+        self.flatten_indices = flat_indices
+        self.position_ids = apply_index_map(self.position_ids.view(-1), flat_indices)[
+            None,
+        ]
+        self.context_lengths = apply_index_map(
+            self.context_lengths, self.flatten_indices  # type: ignore
+        )  # n'
+        self.block_mapping = apply_index_map(
+            self.block_mapping, self.flatten_indices
+        )  # n' n_blocks
+
+    def apply_right_padding_to_block_mapping(self, block_mapping_max: int):
+        """
+        right pad the block mapping when cudagraphs is enabled
+
+        Args:
+            block_mapping_max: int
+                the maximum number of blocks per sequence required to complete generation
+        """
+        self.block_mapping = torch.stack(
+            [
+                F.pad(
+                    self.block_mapping[i],
+                    (0, block_mapping_max - self.block_mapping.size(1)),
+                )
+                for i in range(self.block_mapping.size(0))
+            ]
+        )
 
 
 def get_cache_block_size(block_size, head_size, num_heads, num_layers, dtype) -> int:
@@ -1016,7 +1161,9 @@ class PagedKVCacheManager:
         context_lengths_tensor = torch.tensor(
             context_lengths, dtype=torch.int, device=self.device
         )
-
+        query_length = (
+            0 if max_num_tokens_per_sequence is None else max_num_tokens_per_sequence
+        )
         return PagedAttentionCacheData(
             data=self.cache,
             max_sequence_length=max_sequence_length,
@@ -1031,6 +1178,7 @@ class PagedKVCacheManager:
             head_size=self.head_size,
             is_generating=not is_prompt,
             sequence_ids=sequence_ids,
+            query_length=query_length,
         )
 
     def allocate_tokens(
