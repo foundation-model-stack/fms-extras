@@ -80,6 +80,38 @@ def test_get_model_from_hf():
     )
 
 
+def test_saved_hf_model_produces_same_output_as_original_fms():
+    vocab_size = 256
+    emb_dim = 64
+    inner_dim = 32
+    n_predict = 4
+    speculator = MLPSpeculator(
+        emb_dim=emb_dim, vocab_size=vocab_size, inner_dim=inner_dim, n_predict=n_predict
+    )
+    speculator.reset_parameters()
+    speculator.eval()
+
+    top_k_tokens_per_head = [5, 3, 2, 2]
+    n_candidates = 5
+    hf_speculator = to_hf_api(
+        speculator,
+        top_k_tokens_per_head=top_k_tokens_per_head,
+        n_candidates=n_candidates,
+    )
+    hf_speculator.eval()
+
+    with tempfile.TemporaryDirectory() as workdir:
+        hf_path = f"{workdir}/hf_speculator_out.pth"
+        hf_speculator.save_pretrained(hf_path)
+
+        loaded_hf_speculator = MLPSpeculatorPreTrainedModel.from_pretrained(hf_path)
+        loaded_hf_speculator.eval()
+
+    __test_speculator_equivalence(
+        speculator, loaded_hf_speculator, top_k_tokens_per_head, n_candidates
+    )
+
+
 def test_to_hf_api():
     vocab_size = 256
     emb_dim = 64
