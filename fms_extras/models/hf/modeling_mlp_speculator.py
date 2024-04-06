@@ -54,7 +54,7 @@ class MLPSpeculatorConfig(PretrainedConfig):
 
 class MLPSpeculatorPreTrainedModel(PreTrainedModel):
     """
-    Hugginface MLPSpeculator which provides loading/saving in huggingface
+    Huggingface MLPSpeculator which provides loading/saving in huggingface
     """
 
     config_class = MLPSpeculatorConfig
