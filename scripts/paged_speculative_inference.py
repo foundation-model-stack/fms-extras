@@ -44,7 +44,8 @@ parser.add_argument(
     type=str,
     default=None,
     choices=["hf"],
-    help="Source format of speculator weights",
+    help="Source format of speculator weights. Note: If the weights path specified in speculator_path are not local and "
+    "the source is hf, the weights will be pulled using the normal Huggingface from_pretrained method.",
 )
 parser.add_argument(
     "--model_source",
