@@ -4,7 +4,9 @@ from typing import Dict, List, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from fms import models
 from fms.modules.layernorm import LayerNormParameterized
+from fms.utils import serialization
 
 
 class MLPSpeculator(nn.Module):
@@ -256,3 +258,36 @@ def flatten_batch(inp: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.
     flat_map_tensor = torch.tensor(flat_map, device=inp.device, dtype=torch.int32)
     out = apply_index_map(inp.view(-1), flat_map_tensor, 0)
     return out, unflat_map, flat_map_tensor
+
+
+_llama_7b = {"emb_dim": 4096, "vocab_size": 32000, "n_predict": 3, "inner_dim": 0}
+
+_llama_13b = {"emb_dim": 5120, "vocab_size": 32000, "n_predict": 3, "inner_dim": 4096}
+
+_architecture_name = "mlp_speculator"
+
+
+def _mlp_speculator_factory_factory(variant_config_dict):
+    def factory(**user_kwargs):
+        return MLPSpeculator(**(variant_config_dict | user_kwargs))
+
+    return factory
+
+
+models.register_model(
+    _architecture_name, "llama.7b", _mlp_speculator_factory_factory(_llama_7b)
+)
+models.register_model(
+    _architecture_name, "llama.13b", _mlp_speculator_factory_factory(_llama_13b)
+)
+
+
+def _rename_hf_weights_to_fms(orig_sd):
+    new_sd = {}
+    for name, param in orig_sd.items():
+        new_sd[name.replace("speculator.", "")] = param
+
+    return new_sd
+
+
+serialization.register_adapter(_architecture_name, "hf", _rename_hf_weights_to_fms)

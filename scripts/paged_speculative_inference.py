@@ -10,6 +10,7 @@ from fms.utils import generation, tokenizers
 from torch import distributed as dist
 
 import fms_extras.models.paged_llama
+from fms_extras.models.hf.modeling_mlp_speculator import MLPSpeculatorPreTrainedModel
 from fms_extras.models.speculator import MLPSpeculator
 from fms_extras.utils.generation import paged_generate, speculative_generate
 
@@ -37,6 +38,14 @@ parser.add_argument(
     type=str,
     default=None,
     help="Path to the checkpoint containing speculator weights (single .pth file, not HF weights)",
+)
+parser.add_argument(
+    "--speculator_source",
+    type=str,
+    default=None,
+    choices=["hf"],
+    help="Source format of speculator weights. Note: If the weights path specified in speculator_path are not local and "
+    "the source is hf, the weights will be pulled using the normal Huggingface from_pretrained method.",
 )
 parser.add_argument(
     "--model_source",
@@ -141,12 +150,24 @@ torch.set_grad_enabled(False)
 speculator = None
 if args.speculator_path is not None:
     print("loading speculator")
-    speculator = MLPSpeculator(
-        model.config.emb_dim, 4096, model.config.src_vocab_size, n_predict=3
-    )
-    speculator.load_state_dict(
-        torch.load(args.speculator_path, map_location=device)["model_state"]
-    )
+    # todo: handling of remote weights in get_model
+    is_local = os.path.exists(args.speculator_path) or args.speculator_source != "hf"
+    if is_local:
+        speculator = get_model(
+            "mlp_speculator",
+            f"llama.{args.variant}",
+            model_path=args.speculator_path,
+            source=args.speculator_source,
+            device_type=args.device_type,
+        )
+    else:
+        from fms_extras.models.hf.modeling_mlp_speculator import (
+            MLPSpeculatorPreTrainedModel,
+        )
+
+        speculator = MLPSpeculatorPreTrainedModel.from_pretrained(
+            args.speculator_path, device_map=args.device_type
+        ).speculator
     speculator = speculator.to(device)
     print("loading complete on rank", local_rank)
 
