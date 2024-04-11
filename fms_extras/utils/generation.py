@@ -218,8 +218,8 @@ def __get_best_candidates(
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Find the candidates with the best speculator predictions and get the indices of the
-    best candidates, the number of tokens correct, and the base model outputs for those
-    candidates and values (tokens and embeddings).
+    best candidates, the number of tokens correct, and the base model output values
+    for that candidate (tokens and embeddings)
 
     Args:
         input_ids: torch.Tensor
@@ -230,10 +230,10 @@ def __get_best_candidates(
             the output embeddings for the best guesses
 
     Returns:
-    Tuple[List[torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor]
-        a list of tensors of the correct tokens per best guess ([b] x n<=1+h), a tensor of the 
-        last correct embed per best guess (b x 1 x d), a tensor of the number of correct tokens 
-        per best guess (b), and a tensor containing the best guess index amongst all candidates
+    Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+        a tensor of the next tokens per best guess (b x 1+h), a tensor of the embeds
+        per best guess (b x 1+h x d), a tensor of the number of correct tokens per
+        best guess (b), and a tensor containing the best guess amongst all candidates
         per sequence (b)
     """
     batch_size, num_candidates_per_sequence, decode_seq_length = input_ids.shape
@@ -254,18 +254,36 @@ def __get_best_candidates(
     ).squeeze(
         1
     )  # b 1+h d
+    return next_vals, embeds, n_correct, best_guess
 
-    # Remove any wrong speculator tokens from best candidate
+
+def __get_correct_tokens(
+    next_vals: torch.Tensor, n_correct: torch.Tensor, embeds: torch.Tensor
+) -> Tuple[List[torch.Tensor], torch.Tensor]:
+    """
+    extract the correct tokens and the last correct embedding from each candidate, to
+    be used to start the next set of speculative candidates
+
+    Args:
+        next_vals: torch.Tensor
+            a tensor of the next tokens per best guess
+        n_correct: torch.Tensor
+            a tensor of the number of correct tokens per best guess
+        embeds: torch.Tensor
+            a tensor of the embeds per best guess
+
+    Returns:
+    Tuple[List[torch.Tensor], torch.Tensor]
+        a list of tensor of the correct tokens, and a tensor of the correct embeddings
+    """
     next_vals_split = list(next_vals)
     next_vals_split = [
         next_vals_split[i][: n_correct[i] + 1] for i in range(len(next_vals_split))
     ]  # [b] h'
-
-    # Get last correct embedding for use in next round of predictions
     embeds = embeds.gather(
         1, n_correct.view(-1, 1, 1).expand(-1, -1, embeds.size(2))
-    )  # b 1 d
-    return next_vals_split, embeds, n_correct, best_guess
+    )  # Grab last correct embed
+    return next_vals_split, embeds
 
 
 def __prune_candidates(
@@ -297,7 +315,7 @@ def __prune_candidates(
             correct embeddings, and a list of the best candidate id per sequence
     """
     # get the best candidates
-    next_vals_split, embeds, n_correct, best_guess = __get_best_candidates(
+    next_vals, embeds, n_correct, best_guess = __get_best_candidates(
         input_ids, next_vals, embeds
     )
 
@@ -309,6 +327,9 @@ def __prune_candidates(
         n_correct,
         input_ids.size(2),
     )
+
+    # Remove any wrong speculator tokens from best candidate
+    next_vals_split, embeds = __get_correct_tokens(next_vals, n_correct, embeds)
     return next_vals_split, embeds, parent_sequence_ids
 
 
@@ -336,24 +357,45 @@ def __extract_decode_output(
 
     Returns:
         Tuple[torch.Tensor, torch.Tensor]
-            the un-flattened next tokens per candidate per sequence, and the
-            un-flattened output embedding vector
+            the un-flattened logit scores per token per candidate per sequence,
+            and the un-flattened output embedding vectors
     """
     logits, _, embeds = model_output  # 1 n' v, 1 n' d  OR  bk 1+h v, bk 1+h d
-    next_vals = torch.argmax(logits, dim=-1)  # 1 n'  OR  bk 1+h
 
     # If we used batch flattening / tree attention, unflatten the outputs
     if unflat_indices is not None:
-        next_vals = apply_index_map(next_vals[0], unflat_indices)  # b k 1+h
+        logits = apply_index_map(logits[0], unflat_indices)  # b k 1+h v
         embeds = apply_index_map(embeds[0], unflat_indices)  # b k 1+h d
     else:
-        next_vals = next_vals.view(
-            batch_size, n_candidates, decode_seq_length
-        )  # b k 1+h
+        logits = logits.view(
+            batch_size, n_candidates, decode_seq_length, logits.size(2)
+        )  # b k 1+h v
         embeds = embeds.view(
             batch_size, n_candidates, decode_seq_length, embeds.size(2)
         )  # b k 1+h d
-    return next_vals, embeds
+    return logits, embeds
+
+
+def __generate_targets(
+    logits: torch.Tensor, temperature: int = 1, top_k: int = 5, do_sample: bool = False
+) -> torch.Tensor:
+    if not do_sample:
+        return logits.argmax(-1)
+
+    # Get sample distributions
+    logits = logits / temperature
+    v, _ = logits.topk(logits, top_k)
+    logits[logits < v[:, :, :, [-1]]] = -float("inf")
+    probs = logits.softmax(-1)  # b k 1+h v
+
+    # Sample candidate-consistent ground truths
+    key = torch.rand(1, 1, logits.size(2), 1, device=probs.device)
+    a = probs.cumsum(3).sub(key).sign()  # All intervals around/above key
+    b = (
+        probs.flip(3).cumsum(3).flip(3).sub(1 - key).sign()
+    )  # All intervals around/below key
+    choice = a.add(b)  # The interval around key
+    return choice.argmax(3)
 
 
 def speculative_generate(
@@ -369,6 +411,9 @@ def speculative_generate(
     decode_model: Optional[Union[Callable, torch.nn.Module]] = None,
     # todo: This is a WIP to enable cudagraphs, currently its only for batch_size=1
     cudagraphs: bool = False,
+    do_sample: bool = False,
+    temperature: float = 1.0,
+    top_k: int = 5,
 ):
     """
     A reference implementation of speculative decoding generation.
@@ -412,6 +457,15 @@ def speculative_generate(
             if True, cudagraphs is used and all metadata will be padded, otherwise
             metadata will not be padded unless required. Note: This is a WIP and
             only works for batch_size=1
+        do_sample: bool
+            non-deterministic, multinomial output sampling. False for greedy.
+            Provides output diversity, but lowers speculative decoding speedup.
+        temperature: float
+            temperature of softmax when sampling. Lowering this should provide
+            better speculative decoding speedup when do_sample=True.
+        top_k: int
+            only search among top k tokens. Lowering this should provide
+            better speculative decoding speedup when do_sample=True.
     Returns:
         result: List of id tensors, possibly different lengths if batching.
         n_steps: Number of foward passes used to generate provided tokens.
@@ -497,8 +551,12 @@ def speculative_generate(
             use_cache=True,
         )  # 1 n' v  OR  bk 1+h v
 
-        next_vals, embeds = __extract_decode_output(
+        logits, embeds = __extract_decode_output(
             output, unflat_indices, bsize, n_candidates, inp_len
+        )
+
+        next_vals = __generate_targets(
+            logits, temperature=temperature, top_k=top_k, do_sample=do_sample
         )
 
         next_vals_list, embeds, parent_sequence_ids = __prune_candidates(
