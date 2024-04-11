@@ -94,6 +94,23 @@ parser.add_argument(
     action="store_true",
     help="use a batch of prompts as input (note this is still wip for reduce-overhead=True)",
 )
+parser.add_argument(
+    "--top_k",
+    type=int,
+    default=10,
+    help="sample only among top k most confident tokens (ignored if do_sample=False)",
+)
+parser.add_argument(
+    "--temperature",
+    type=float,
+    default=1.0,
+    help="degree of smoothing for sampling distribution (ignored if do_sample=False)",
+)
+parser.add_argument(
+    "--do_sample",
+    action="store_true",
+    help="enable non-greedy generation"
+)
 
 args = parser.parse_args()
 
@@ -232,6 +249,9 @@ def infer(ids, warmup):
             # todo: we can only reduce-overhead for now when batch size is 1
             flattening=not (args.compile and compile_mode == "reduce-overhead"),
             cudagraphs=cudagraphs,
+            do_sample=args.do_sample,
+            temperature=args.temperature,
+            top_k=args.top_k
         )
     else:
         result, n_steps, ttft, generated_token_time_out = paged_generate(
@@ -240,9 +260,11 @@ def infer(ids, warmup):
             kv_cache_manager,
             max_new_tokens=100,
             max_seq_len=model.config.max_expected_seq_len,
-            do_sample=False,
             decode_model=decode_model,
             cudagraphs=cudagraphs,
+            do_sample=args.do_sample,
+            temperature=args.temperature,
+            top_k=args.top_k
         )
     if not warmup:
         total_tokens = 0

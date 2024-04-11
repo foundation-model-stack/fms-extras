@@ -377,14 +377,14 @@ def __extract_decode_output(
 
 
 def __generate_targets(
-    logits: torch.Tensor, temperature: int = 1, top_k: int = 5, do_sample: bool = False
+    logits: torch.Tensor, temperature: float = 1.0, top_k: int = 5, do_sample: bool = False
 ) -> torch.Tensor:
     if not do_sample:
         return logits.argmax(-1)
 
     # Get sample distributions
     logits = logits / temperature
-    v, _ = logits.topk(logits, top_k)
+    v, _ = logits.topk(top_k)
     logits[logits < v[:, :, :, [-1]]] = -float("inf")
     probs = logits.softmax(-1)  # b k 1+h v
 
