@@ -419,14 +419,14 @@ def __generate_targets(
     logits[logits < v[:, :, :, [-1]]] = -float("inf")
     probs = logits.softmax(-1)  # b k 1+h v
 
-    # Sample candidate-consistent ground truths
+    # Sample candidate-consistent ground truths: partition number line in [0,1]
+    # according to given multinomial distribution. Pick a random location
+    # on that line, return interval containing that location.
     key = torch.rand(1, 1, logits.size(2), 1, device=probs.device)
-    a = probs.cumsum(3).sub(key).sign()  # All intervals around/above key
-    b = (
-        probs.flip(3).cumsum(3).flip(3).sub(1 - key).sign()
-    )  # All intervals around/below key
-    choice = a.add(b)  # The interval around key
-    return choice.argmax(3)
+    a = (
+        probs.cumsum(3).sub(key).sign()
+    )  # Sign flips on probability interval containing key
+    return a.sub(1).div(-2).sum(3)  # Get index of sign-flip
 
 
 def speculative_generate(
