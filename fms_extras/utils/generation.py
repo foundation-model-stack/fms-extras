@@ -218,8 +218,8 @@ def __get_best_candidates(
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Find the candidates with the best speculator predictions and get the indices of the
-    best candidates, the number of tokens correct, and the base model output values
-    for that candidate (tokens and embeddings)
+    best candidates, the number of tokens correct, and the base model outputs for those
+    candidates and values (tokens and embeddings).
 
     Args:
         input_ids: torch.Tensor
@@ -230,10 +230,10 @@ def __get_best_candidates(
             the output embeddings for the best guesses
 
     Returns:
-    Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
-        a tensor of the next tokens per best guess (b x 1+h), a tensor of the embeds
-        per best guess (b x 1+h x d), a tensor of the number of correct tokens per
-        best guess (b), and a tensor containing the best guess amongst all candidates
+    Tuple[List[torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor]
+        a list of tensors of the correct tokens per best guess ([b] x n<=1+h), a tensor of the 
+        last correct embed per best guess (b x 1 x d), a tensor of the number of correct tokens 
+        per best guess (b), and a tensor containing the best guess index amongst all candidates
         per sequence (b)
     """
     batch_size, num_candidates_per_sequence, decode_seq_length = input_ids.shape
@@ -254,36 +254,18 @@ def __get_best_candidates(
     ).squeeze(
         1
     )  # b 1+h d
-    return next_vals, embeds, n_correct, best_guess
 
-
-def __get_correct_tokens(
-    next_vals: torch.Tensor, n_correct: torch.Tensor, embeds: torch.Tensor
-) -> Tuple[List[torch.Tensor], torch.Tensor]:
-    """
-    extract the correct tokens and the last correct embedding from each candidate, to
-    be used to start the next set of speculative candidates
-
-    Args:
-        next_vals: torch.Tensor
-            a tensor of the next tokens per best guess
-        n_correct: torch.Tensor
-            a tensor of the number of correct tokens per best guess
-        embeds: torch.Tensor
-            a tensor of the embeds per best guess
-
-    Returns:
-    Tuple[List[torch.Tensor], torch.Tensor]
-        a list of tensor of the correct tokens, and a tensor of the correct embeddings
-    """
+    # Remove any wrong speculator tokens from best candidate
     next_vals_split = list(next_vals)
     next_vals_split = [
         next_vals_split[i][: n_correct[i] + 1] for i in range(len(next_vals_split))
     ]  # [b] h'
+
+    # Get last correct embedding for use in next round of predictions
     embeds = embeds.gather(
         1, n_correct.view(-1, 1, 1).expand(-1, -1, embeds.size(2))
-    )  # Grab last correct embed
-    return next_vals_split, embeds
+    )  # b 1 d
+    return next_vals_split, embeds, n_correct, best_guess
 
 
 def __prune_candidates(
@@ -315,7 +297,7 @@ def __prune_candidates(
             correct embeddings, and a list of the best candidate id per sequence
     """
     # get the best candidates
-    next_vals, embeds, n_correct, best_guess = __get_best_candidates(
+    next_vals_split, embeds, n_correct, best_guess = __get_best_candidates(
         input_ids, next_vals, embeds
     )
 
@@ -327,9 +309,6 @@ def __prune_candidates(
         n_correct,
         input_ids.size(2),
     )
-
-    # Remove any wrong speculator tokens from best candidate
-    next_vals_split, embeds = __get_correct_tokens(next_vals, n_correct, embeds)
     return next_vals_split, embeds, parent_sequence_ids
 
 
