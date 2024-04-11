@@ -107,9 +107,7 @@ parser.add_argument(
     help="degree of smoothing for sampling distribution (ignored if do_sample=False)",
 )
 parser.add_argument(
-    "--do_sample",
-    action="store_true",
-    help="enable non-greedy generation"
+    "--do_sample", action="store_true", help="enable non-greedy generation"
 )
 
 args = parser.parse_args()
@@ -251,7 +249,7 @@ def infer(ids, warmup):
             cudagraphs=cudagraphs,
             do_sample=args.do_sample,
             temperature=args.temperature,
-            top_k=args.top_k
+            top_k=args.top_k,
         )
     else:
         result, n_steps, ttft, generated_token_time_out = paged_generate(
@@ -264,7 +262,7 @@ def infer(ids, warmup):
             cudagraphs=cudagraphs,
             do_sample=args.do_sample,
             temperature=args.temperature,
-            top_k=args.top_k
+            top_k=args.top_k,
         )
     if not warmup:
         total_tokens = 0

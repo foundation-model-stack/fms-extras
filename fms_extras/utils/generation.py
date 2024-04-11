@@ -377,8 +377,39 @@ def __extract_decode_output(
 
 
 def __generate_targets(
-    logits: torch.Tensor, temperature: float = 1.0, top_k: int = 5, do_sample: bool = False
+    logits: torch.Tensor,
+    temperature: float = 1.0,
+    top_k: int = 5,
+    do_sample: bool = False,
 ) -> torch.Tensor:
+    """
+    Extracts ground-truth tokens from a set of logits. If performing greedy decoding,
+    simply returns the most confident tokens. Otherwise, implements consistent multinomial
+    sampling - two identical distributions will always produce the same (randomized) sample.
+    Thus by induction, two candidates with identical prefixes will receive the same ground
+    truth sample up to the point their inputs diverge. This allows us to ensure that at least
+    one candidate will be accepted, so long as the candidate set covers the top_k options.
+
+    For example, if the base model predicts tokens A and B with equal 50% probability, and the
+    speculator produces one candidate with A and another with B, with independent sampling there's
+    a 25% chance of rejecting both, even though one must be correct. Consistent sampling allows us
+    to avoid this.
+
+    Args:
+        logits: torch.Tensor
+            Probability logits for a set of candidate sequences. Expects size
+            bsize x n_candidates x seq_len x vocab_size
+        temperature: float
+            Degree of smoothing on softmax sampling distribution
+        top_k: int
+            Sample only among the top_k most confident tokens
+        do_sample: bool
+            Enable non-greedy decoding with consistent sampling
+
+    Returns:
+        torch.Tensor
+            Tensor of chosen token values for each sequence
+    """
     if not do_sample:
         return logits.argmax(-1)
 
