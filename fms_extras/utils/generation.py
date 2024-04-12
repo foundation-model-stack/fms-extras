@@ -378,9 +378,9 @@ def __extract_decode_output(
 
 def __generate_targets(
     logits: torch.Tensor,
+    do_sample: torch.Tensor,
     temperature: float = 1.0,
     top_k: int = 5,
-    do_sample: bool = False,
 ) -> torch.Tensor:
     """
     Extracts ground-truth tokens from a set of logits. If performing greedy decoding,
@@ -399,19 +399,18 @@ def __generate_targets(
         logits: torch.Tensor
             Probability logits for a set of candidate sequences. Expects size
             bsize x n_candidates x seq_len x vocab_size
+        do_sample: torch.Tensor
+            A tensor of booleans enabling/disabling non-greedy decoding with consistent
+            sampling, for each of bsize input sequences
         temperature: float
             Degree of smoothing on softmax sampling distribution
         top_k: int
             Sample only among the top_k most confident tokens
-        do_sample: bool
-            Enable non-greedy decoding with consistent sampling
 
     Returns:
         torch.Tensor
             Tensor of chosen token values for each sequence
     """
-    if not do_sample:
-        return logits.argmax(-1)
 
     # Get sample distributions
     logits = logits / temperature
@@ -426,7 +425,12 @@ def __generate_targets(
     a = (
         probs.cumsum(3).sub(key).sign()
     )  # Sign flips on probability interval containing key
-    return a.sub(1).div(-2).sum(3)  # Get index of sign-flip
+    samples = a.sub(1).div(-2).sum(3)  # Get index of sign-flip
+
+    # Composite greedy and non greedy outputs
+    greedy = logits.argmax(-1)
+    mask = do_sample[:, None, None].int()
+    return samples * mask + (1 - mask) * greedy
 
 
 def speculative_generate(
@@ -586,8 +590,12 @@ def speculative_generate(
             output, unflat_indices, bsize, n_candidates, inp_len
         )
 
+        if do_sample:
+            do_sample_vector = torch.ones(bsize, device=logits.device)
+        else:
+            do_sample_vector = torch.zeros(bsize, device=logits.device)
         next_vals = __generate_targets(
-            logits, temperature=temperature, top_k=top_k, do_sample=do_sample
+            logits, do_sample_vector, temperature=temperature, top_k=top_k
         )
 
         next_vals_list, embeds, parent_sequence_ids = __prune_candidates(
