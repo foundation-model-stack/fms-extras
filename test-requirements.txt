@@ -2,9 +2,7 @@
 # It pulls in general dependencies from fms-extras-requirements.txt
 # as well as test-only dependencies
 
-ibm-fms >= 0.0.4
-# keeping here, though we should be using what is in requirements
-# -r fms-extras-requirements.txt
+-r fms-extras-requirements.txt
 
 # Test tools
 mypy==1.8.0
