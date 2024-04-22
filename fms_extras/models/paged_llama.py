@@ -828,9 +828,6 @@ def _rename_fms_weights_to_fms_paged(orig_sd):
                 re.sub(r"attn.(query|key|value)", "attn.key", name),
                 re.sub(r"attn.(query|key|value)", "attn.value", name),
             ]
-            missing_weights = [w for w in unfused_weights if w not in orig_sd.keys()]
-            if len(missing_weights) != 0:
-                raise serialization.FusableWeightsMissingError(missing_weights)
 
             new_sd[
                 re.sub(r"attn.(query|key|value)", "attn.qkv_fused", new_name)
