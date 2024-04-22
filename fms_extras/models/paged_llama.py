@@ -742,9 +742,6 @@ def _rename_weights_to_fms(orig_sd):
                 re.sub(r"w[qkv]", "wk", name),
                 re.sub(r"w[qkv]", "wv", name),
             ]
-            missing_weights = [w for w in unfused_weights if w not in orig_sd.keys()]
-            if len(missing_weights) != 0:
-                raise serialization.FusableWeightsMissingError(missing_weights)
 
             new_sd[
                 re.sub(r"attn.(query|key|value)", "attn.qkv_fused", new_name)
@@ -788,9 +785,6 @@ def _hf_sd_to_fms_sd(hf_sd: Mapping) -> Mapping:
                 re.sub(r"self_attn\.[kvq]_proj", "self_attn.k_proj", name),
                 re.sub(r"self_attn\.[kvq]_proj", "self_attn.v_proj", name),
             ]
-            missing_weights = [w for w in unfused_weights if w not in hf_sd.keys()]
-            if len(missing_weights) != 0:
-                raise serialization.FusableWeightsMissingError(missing_weights)
 
             raw_mapping = {w: hf_sd[w] for w in unfused_weights}
 
