@@ -94,7 +94,20 @@ parser.add_argument(
     action="store_true",
     help="use a batch of prompts as input (note this is still wip for reduce-overhead=True)",
 )
-
+# top_k_tokens_per_head
+parser.add_argument(
+    "--top_k_tokens_per_head",
+    type=lambda s: list(map(int, s.split(","))),
+    default=[5, 3, 2],
+    help="Number of tokens to consider from each head when forming the candidate tree. For each candidate branch in the tree, head n produces topk[n] additional sub-branches.",
+)
+parser.add_argument(
+    "--prompt_type",
+    type=str,
+    choices=["chat", "code"],
+    default="chat",
+    help="type of prompts to be used, either chat or code",
+)
 args = parser.parse_args()
 
 if args.batch_input and args.compile and args.compile_mode == "reduce-overhead":
@@ -169,6 +182,11 @@ if args.speculator_path is not None:
             args.speculator_path, device_map=args.device_type
         ).speculator
     speculator = speculator.to(device)
+    if len(args.top_k_tokens_per_head) != speculator.n_predict:
+        print(
+            "length of top_k_tokens_per_head must be equal to the speculator's number of heads (n_predict)"
+        )
+        exit()
     print("loading complete on rank", local_rank)
 
 print("initializing paged cache")
@@ -191,8 +209,8 @@ print("cache initialization complete on rank", local_rank)
 
 def ids_for_prompt(prompt):
     tokens = tokenizer.tokenize(prompt)
-    tokens = ["<s>"] + tokens
     ids = tokenizer.convert_tokens_to_ids(tokens)
+    ids = [tokenizer.bos_token_id] + ids
     ids = torch.tensor(ids, dtype=torch.long, device=device)
     return ids
 
@@ -201,11 +219,7 @@ def print_result(result, inp, n_steps):
     if local_rank != 0:
         return
     # stop at EOS token if present
-    result = generation.truncate_after_eos(
-        result, tokenizer.convert_tokens_to_ids("</s>")
-    )
-    # print(result)
-    # print(tokenizer.convert_ids_to_tokens(result))
+    result = generation.truncate_after_eos(result, tokenizer.eos_token_id)
     print(tokenizer.convert_tokens_to_string(tokenizer.convert_ids_to_tokens(result)))
     print(f"{len(result) - len(inp)} tokens in {n_steps} steps")
     print()
@@ -232,6 +246,7 @@ def infer(ids, warmup):
             # todo: we can only reduce-overhead for now when batch size is 1
             flattening=not (args.compile and compile_mode == "reduce-overhead"),
             cudagraphs=cudagraphs,
+            threshes=args.top_k_tokens_per_head,
         )
     else:
         result, n_steps, ttft, generated_token_time_out = paged_generate(
@@ -268,14 +283,35 @@ if args.compile:
             speculator.generate_suffixes, mode=compile_mode
         )
 
-template = "Below is an instruction that describes a task. Write a response that appropriately completes the request.\n\n### Instruction:\n{}\n\n### Response:"
+if args.prompt_type == "chat":
+    template = "Below is an instruction that describes a task. Write a response that appropriately completes the request.\n\n### Instruction:\n{}\n\n### Response:"
 
-prompt1 = template.format("Provide a list of instructions for preparing chicken soup.")
-prompt2 = template.format("Explain some popular greetings in Spanish.")
-prompt3 = template.format("Explain to me why ignorance is bliss.")
-prompt4 = template.format(
-    "I have just come into a very large sum of money. I received the money from my parents who told me I could do whatever I want with it. My first thought was to go to a financial advisor. Provide me a list of things that I can do with my new found wealth."
-)
+    prompt1 = template.format(
+        "Provide a list of instructions for preparing chicken soup."
+    )
+    prompt2 = template.format("Explain some popular greetings in Spanish.")
+    prompt3 = template.format("Explain to me why ignorance is bliss.")
+    prompt4 = template.format(
+        "I have just come into a very large sum of money. I received the money from my parents who told me I could do whatever I want with it. My first thought was to go to a financial advisor. Provide me a list of things that I can do with my new found wealth."
+    )
+
+elif args.prompt_type == "code":
+    template = "[INST] Write code to solve the following coding problem that obeys the constraints and passes the example test cases. Please wrap your code answer using ```:\n{}\n[/INST]"
+    prompt1 = template.format("Write a bubble sort function in python.")
+    prompt2 = template.format(
+        "Using the Java streams API, write a simple function which will get the cumulative sum of a list of integers."
+    )
+    prompt3 = template.format(
+        "In bash, how do I list all directories and sub-directories which contain a .py file."
+    )
+    prompt4 = template.format(
+        "Write a simple decorator in python which will modify all string inputs to ints if possible."
+    )
+
+else:
+    print("prompt_type must be one of chat or code")
+    exit()
+
 
 prompt1 = ids_for_prompt(prompt1)
 prompt2 = ids_for_prompt(prompt2)

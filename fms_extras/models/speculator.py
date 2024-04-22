@@ -264,6 +264,13 @@ _llama_7b = {"emb_dim": 4096, "vocab_size": 32000, "n_predict": 3, "inner_dim": 
 
 _llama_13b = {"emb_dim": 5120, "vocab_size": 32000, "n_predict": 3, "inner_dim": 4096}
 
+_llama_13b_code = {
+    "emb_dim": 5120,
+    "vocab_size": 32016,
+    "n_predict": 7,
+    "inner_dim": 4096,
+}
+
 _architecture_name = "mlp_speculator"
 
 
@@ -279,6 +286,11 @@ models.register_model(
 )
 models.register_model(
     _architecture_name, "llama.13b", _mlp_speculator_factory_factory(_llama_13b)
+)
+models.register_model(
+    _architecture_name,
+    "llama.13b_code",
+    _mlp_speculator_factory_factory(_llama_13b_code),
 )
 
 

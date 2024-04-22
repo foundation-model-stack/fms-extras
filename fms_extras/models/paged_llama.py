@@ -54,6 +54,7 @@ class PagedLLaMAConfig(ModelConfig):
     p_dropout: float = 0.0
     max_expected_seq_len: int = 4096
     ntk_scaling: bool = False
+    rope_theta: int = 10_000
 
 
 class PagedMultiHeadAttention(nn.Module):
@@ -477,6 +478,7 @@ class PagedLLaMAHeadless(nn.Module):
             dim=self.config.emb_dim // self.config.nheads,
             ntk_scaling=self.config.ntk_scaling,
             max_seq_len=self.config.max_expected_seq_len,
+            ratio=self.config.rope_theta,
         )
         if isinstance(self.distributed_strategy, UniformModelParallelStrategy):
             for dev_idx in set(self.distributed_strategy.layer_to_device):
@@ -678,6 +680,14 @@ _micro_char_config = PagedLLaMAConfig(
 
 _7b_config = PagedLLaMAConfig()
 _13b_config = PagedLLaMAConfig(emb_dim=5120, nheads=40, nlayers=40)
+_13b_code_config = PagedLLaMAConfig(
+    emb_dim=5120,
+    nheads=40,
+    nlayers=40,
+    src_vocab_size=32016,
+    max_expected_seq_len=16384,
+    rope_theta=1_000_000,
+)
 # todo: add 35B config
 
 _70b_config = PagedLLaMAConfig(
@@ -704,6 +714,9 @@ models.register_model(
 )
 models.register_model(_architecture_name, "7b", _llama_factory_factory(_7b_config))
 models.register_model(_architecture_name, "13b", _llama_factory_factory(_13b_config))
+models.register_model(
+    _architecture_name, "13b_code", _llama_factory_factory(_13b_code_config)
+)
 models.register_model(_architecture_name, "70b", _llama_factory_factory(_70b_config))
 
 
