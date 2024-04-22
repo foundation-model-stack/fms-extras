@@ -23,7 +23,6 @@ from fms.modules.positions import RotaryEmbedding
 from fms.utils import serialization
 from fms.utils.activation import str_to_activation
 from fms.utils.config import ModelConfig
-from fms.utils.serialization import FusableWeightsMissingError
 from fms.utils.tokenizers import _has_hf, get_tokenizer
 
 
@@ -422,9 +421,6 @@ def _megatron_sd_to_fms_sd(hf_sd: Mapping[Any, Any]) -> Mapping[Any, Any]:
 
         # qkv fused
         if bool(qkv_weight_pattern.match(name)):
-            bias_name = name.replace("weight", "bias")
-            if bias_name not in hf_sd:
-                raise FusableWeightsMissingError([bias_name])
             new_sd.pop(new_name)
 
             emb_dim = param.size(1)
@@ -455,8 +451,6 @@ def _megatron_sd_to_fms_sd(hf_sd: Mapping[Any, Any]) -> Mapping[Any, Any]:
             new_sd[f"{prefix}value.weight"] = v
         elif bool(qkv_bias_pattern.match(name)):
             weight_name = name.replace("bias", "weight")
-            if weight_name not in hf_sd:
-                raise FusableWeightsMissingError([weight_name])
             new_sd.pop(new_name)
 
             emb_dim = hf_sd[weight_name].size(1)
