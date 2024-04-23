@@ -25,7 +25,7 @@ This repo follows the same structure to that of [foundation-model-stack](https:/
 
 * `fms_extras/models/` - Pure pytorch implementations of popular model architectures, without requiring any specific common interface beyond `nn.Module`. Each model configuration is registered with `fms.models.register_model()` so that instances can be obtained through `fms.models.get_model('architecture', 'variant', '/path/to/data')`. Each model can also register sources/formats/versions of data to load (e.g. checkpoints provided by meta, HF, or trained from this repo). Users of the repo (e.g. `fms-extras`) can register their own model architectures as well.
 * `fms_extras/models/hf/` - Adapters that compose our native PyTorch FMS model architecture implementations in HF-compatible wrapper interfaces. Each FMS model implements an adapter, and adapted instances are obtained via `fms.models.hf.to_hf_api(model)`
-* `fms_extras/utils/` - Other operators useful in working with LLMs. These include a `generate()` function, `Tensor` subclasses, code for dealing with LLM checkpoints that might be saved/sharded in a variety of formats, tokenization code, and various other useful helper functions.
+* `fms_extras/utils/` - Other operators useful in working with LLMs. These include a `speculative_generate()` function, `PagedKVCacheManager` class for easy-to-use kv-cache management with paged attention kernels, etc.
 * `scripts/` - Various scripts for inference, benchmarking, and evaluation, as well as an entry-point for tuning/training.
 
 ## References
