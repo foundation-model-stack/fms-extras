@@ -31,6 +31,5 @@ This repo follows a similar structure to that of [foundation-model-stack](https:
 
 ## References
 
-Huggingface TGI: https://github.com/huggingface/text-generation-inference
-
-IBM TGIS: https://github.com/IBM/text-generation-inference
+- Huggingface TGI: https://github.com/huggingface/text-generation-inference
+- IBM TGIS: https://github.com/IBM/text-generation-inference
