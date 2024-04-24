@@ -261,6 +261,12 @@ def flatten_batch(inp: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.
 
 
 _llama_7b = {"emb_dim": 4096, "vocab_size": 32000, "n_predict": 3, "inner_dim": 0}
+_ibm_llama_7b_instruct_lab = {
+    "emb_dim": 4096,
+    "vocab_size": 32008,
+    "n_predict": 5,
+    "inner_dim": 0,
+}
 
 _llama_13b = {"emb_dim": 5120, "vocab_size": 32000, "n_predict": 3, "inner_dim": 4096}
 
@@ -280,6 +286,12 @@ def _mlp_speculator_factory_factory(variant_config_dict):
 
     return factory
 
+
+models.register_model(
+    _architecture_name,
+    "llama.ibm.7b_instruct_lab",
+    _mlp_speculator_factory_factory(_ibm_llama_7b_instruct_lab),
+)
 
 models.register_model(
     _architecture_name, "llama.7b", _mlp_speculator_factory_factory(_llama_7b)
