@@ -277,7 +277,7 @@ _llama_13b_code = {
     "inner_dim": 4096,
 }
 
-_architecture_name = "mlp_speculator"
+_architecture_prefix = "mlp_speculator"
 
 
 def _mlp_speculator_factory_factory(variant_config_dict):
@@ -288,20 +288,24 @@ def _mlp_speculator_factory_factory(variant_config_dict):
 
 
 models.register_model(
-    _architecture_name,
-    "llama.ibm.7b_instruct_lab",
+    f"{_architecture_prefix}.llama.7b.ibm_instruct_lab",
+    "1.4b",
     _mlp_speculator_factory_factory(_ibm_llama_7b_instruct_lab),
 )
 
 models.register_model(
-    _architecture_name, "llama.7b", _mlp_speculator_factory_factory(_llama_7b)
+    f"{_architecture_prefix}.llama.7b",
+    "840m",
+    _mlp_speculator_factory_factory(_llama_7b),
 )
 models.register_model(
-    _architecture_name, "llama.13b", _mlp_speculator_factory_factory(_llama_13b)
+    f"{_architecture_prefix}.llama.13b",
+    "840m",
+    _mlp_speculator_factory_factory(_llama_13b),
 )
 models.register_model(
-    _architecture_name,
-    "llama.13b_code",
+    f"{_architecture_prefix}.llama.13b.code",
+    "2b",
     _mlp_speculator_factory_factory(_llama_13b_code),
 )
 
@@ -314,4 +318,15 @@ def _rename_hf_weights_to_fms(orig_sd):
     return new_sd
 
 
-serialization.register_adapter(_architecture_name, "hf", _rename_hf_weights_to_fms)
+serialization.register_adapter(
+    f"{_architecture_prefix}.llama.7b.ibm_instruct_lab", "hf", _rename_hf_weights_to_fms
+)
+serialization.register_adapter(
+    f"{_architecture_prefix}.llama.7b", "hf", _rename_hf_weights_to_fms
+)
+serialization.register_adapter(
+    f"{_architecture_prefix}.llama.13b", "hf", _rename_hf_weights_to_fms
+)
+serialization.register_adapter(
+    f"{_architecture_prefix}.llama.13b.code", "hf", _rename_hf_weights_to_fms
+)
