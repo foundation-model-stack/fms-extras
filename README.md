@@ -14,7 +14,7 @@ pip install -e .
 
 ## Notable Features
 
-1. `MLPSpeculator`: a lightweight speculator model that can be used along-side a generative model to speed up inference (currently deployed in IBM TGIS with training in https://github.com/foundation-model-stack/fms-fsdp)
+1. `MLPSpeculator`: a lightweight speculator model that can be used along-side a generative model to speed up inference (currently deployed in IBM TGIS with training in [fms-fsdp](https://github.com/foundation-model-stack/fms-fsdp))
 2. `PagedKVCacheManager`: an implementation of kv-cache management that provides a user with the proper input to use paged-attention with their own models (currently deployed in IBM TGIS)
 3. `PagedLLaMA`: a LLaMA implementation that uses paged-attention in Multi-Head Attention. This model is compilable without graph breaks.
 4. `speculative generation`: a reference implementation of speculative generate using PagedKVCacheManager and MLPSpeculator
@@ -31,5 +31,5 @@ This repo follows a similar structure to that of [foundation-model-stack](https:
 
 ## References
 
-Huggingface TGI: https://github.com/huggingface/text-generation-inference
-IBM TGIS: https://github.com/IBM/text-generation-inference
+- Huggingface TGI: https://github.com/huggingface/text-generation-inference
+- IBM TGIS: https://github.com/IBM/text-generation-inference
