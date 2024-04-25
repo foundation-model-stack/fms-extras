@@ -64,7 +64,7 @@ def test_get_model_from_hf():
 
         model = get_model(
             "mlp_speculator",
-            "llama.7b",
+            "llama.7b.840m",
             model_path=path,
             source="hf",
             vocab_size=config.vocab_size,
