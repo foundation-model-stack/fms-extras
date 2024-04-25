@@ -42,7 +42,7 @@ parser.add_argument(
 parser.add_argument(
     "--speculator_variant",
     type=str,
-    default="841m",
+    default="840m",
     help="The model variant (configuration) to benchmark. E.g. 840m, 1.4b, 2b, etc.",
 )
 parser.add_argument(
@@ -173,8 +173,8 @@ if args.speculator_path is not None:
     is_local = os.path.exists(args.speculator_path) or args.speculator_source != "hf"
     if is_local:
         speculator = get_model(
-            f"mlp_speculator.llama.{args.variant}",
-            args.speculator_variant,
+            "mlp_speculator",
+            f"llama.{args.variant}.{args.speculator_variant}",
             model_path=args.speculator_path,
             source=args.speculator_source,
             device_type=args.device_type,
