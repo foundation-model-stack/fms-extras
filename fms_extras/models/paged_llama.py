@@ -679,6 +679,7 @@ _micro_char_config = PagedLLaMAConfig(
 )
 
 _7b_config = PagedLLaMAConfig()
+_ibm_7b_instruct_lab_config = PagedLLaMAConfig(src_vocab_size=32008)
 _13b_config = PagedLLaMAConfig(emb_dim=5120, nheads=40, nlayers=40)
 _13b_code_config = PagedLLaMAConfig(
     emb_dim=5120,
@@ -712,10 +713,16 @@ def _llama_factory_factory(config):
 models.register_model(
     _architecture_name, "micro", _llama_factory_factory(_micro_char_config)
 )
+models.register_model(
+    _architecture_name,
+    "7b.ibm_instruct_lab",
+    _llama_factory_factory(_ibm_7b_instruct_lab_config),
+)
+
 models.register_model(_architecture_name, "7b", _llama_factory_factory(_7b_config))
 models.register_model(_architecture_name, "13b", _llama_factory_factory(_13b_config))
 models.register_model(
-    _architecture_name, "13b_code", _llama_factory_factory(_13b_code_config)
+    _architecture_name, "13b.code", _llama_factory_factory(_13b_code_config)
 )
 models.register_model(_architecture_name, "70b", _llama_factory_factory(_70b_config))
 
