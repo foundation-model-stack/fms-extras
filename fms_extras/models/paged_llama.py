@@ -54,6 +54,7 @@ class PagedLLaMAConfig(ModelConfig):
     p_dropout: float = 0.0
     max_expected_seq_len: int = 4096
     ntk_scaling: bool = False
+    rope_theta: int = 10_000
 
 
 class PagedMultiHeadAttention(nn.Module):
@@ -477,6 +478,7 @@ class PagedLLaMAHeadless(nn.Module):
             dim=self.config.emb_dim // self.config.nheads,
             ntk_scaling=self.config.ntk_scaling,
             max_seq_len=self.config.max_expected_seq_len,
+            ratio=self.config.rope_theta,
         )
         if isinstance(self.distributed_strategy, UniformModelParallelStrategy):
             for dev_idx in set(self.distributed_strategy.layer_to_device):
@@ -677,7 +679,16 @@ _micro_char_config = PagedLLaMAConfig(
 )
 
 _7b_config = PagedLLaMAConfig()
+_ibm_7b_instruct_lab_config = PagedLLaMAConfig(src_vocab_size=32008)
 _13b_config = PagedLLaMAConfig(emb_dim=5120, nheads=40, nlayers=40)
+_13b_code_config = PagedLLaMAConfig(
+    emb_dim=5120,
+    nheads=40,
+    nlayers=40,
+    src_vocab_size=32016,
+    max_expected_seq_len=16384,
+    rope_theta=1_000_000,
+)
 # todo: add 35B config
 
 _70b_config = PagedLLaMAConfig(
@@ -702,8 +713,17 @@ def _llama_factory_factory(config):
 models.register_model(
     _architecture_name, "micro", _llama_factory_factory(_micro_char_config)
 )
+models.register_model(
+    _architecture_name,
+    "7b.ibm_instruct_lab",
+    _llama_factory_factory(_ibm_7b_instruct_lab_config),
+)
+
 models.register_model(_architecture_name, "7b", _llama_factory_factory(_7b_config))
 models.register_model(_architecture_name, "13b", _llama_factory_factory(_13b_config))
+models.register_model(
+    _architecture_name, "13b.code", _llama_factory_factory(_13b_code_config)
+)
 models.register_model(_architecture_name, "70b", _llama_factory_factory(_70b_config))
 
 
@@ -742,9 +762,6 @@ def _rename_weights_to_fms(orig_sd):
                 re.sub(r"w[qkv]", "wk", name),
                 re.sub(r"w[qkv]", "wv", name),
             ]
-            missing_weights = [w for w in unfused_weights if w not in orig_sd.keys()]
-            if len(missing_weights) != 0:
-                raise serialization.FusableWeightsMissingError(missing_weights)
 
             new_sd[
                 re.sub(r"attn.(query|key|value)", "attn.qkv_fused", new_name)
@@ -790,7 +807,9 @@ def _hf_sd_to_fms_sd(hf_sd: Mapping) -> Mapping:
             ]
             missing_weights = [w for w in unfused_weights if w not in hf_sd.keys()]
             if len(missing_weights) != 0:
-                raise serialization.FusableWeightsMissingError(missing_weights)
+                raise ValueError(
+                    f"The following weights are required for properly fusing: {missing_weights}"
+                )
 
             raw_mapping = {w: hf_sd[w] for w in unfused_weights}
 
@@ -836,7 +855,9 @@ def _rename_fms_weights_to_fms_paged(orig_sd):
             ]
             missing_weights = [w for w in unfused_weights if w not in orig_sd.keys()]
             if len(missing_weights) != 0:
-                raise serialization.FusableWeightsMissingError(missing_weights)
+                raise ValueError(
+                    f"The following weights are required for properly fusing: {missing_weights}"
+                )
 
             new_sd[
                 re.sub(r"attn.(query|key|value)", "attn.qkv_fused", new_name)
