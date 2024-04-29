@@ -710,6 +710,8 @@ def _llama_factory_factory(config):
     return factory
 
 
+# llama2
+
 models.register_model(
     _architecture_name, "micro", _llama_factory_factory(_micro_char_config)
 )
@@ -725,6 +727,22 @@ models.register_model(
     _architecture_name, "13b.code", _llama_factory_factory(_13b_code_config)
 )
 models.register_model(_architecture_name, "70b", _llama_factory_factory(_70b_config))
+
+# llama3
+
+_8b_llama3_config = PagedLLaMAConfig(
+    src_vocab_size=128256,
+    emb_dim=4096,
+    norm_eps=1e-5,
+    nheads=32,
+    kvheads=8,
+    nlayers=32,
+    hidden_grow_factor=3.5,
+    multiple_of=1024,
+    max_expected_seq_len=8192,
+)
+
+models.register_model("paged_llama3", "8b", _llama_factory_factory((_8b_llama3_config)))
 
 
 def _rename_weights_to_fms(orig_sd):
@@ -871,3 +889,4 @@ serialization.register_adapter(_architecture_name, "hf", _hf_sd_to_fms_sd)
 serialization.register_adapter(
     _architecture_name, "fms_llama", _rename_fms_weights_to_fms_paged
 )
+serialization.register_adapter("paged_llama3", "hf", _hf_sd_to_fms_sd)

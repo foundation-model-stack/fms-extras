@@ -23,6 +23,13 @@ parser = argparse.ArgumentParser(
 )
 parser.add_argument("--device_type", type=str, default="cuda")
 parser.add_argument(
+    "--architecture",
+    type=str,
+    default="llama",
+    choices=["llama", "llama3"],
+    help="The model architecture",
+)
+parser.add_argument(
     "--variant",
     type=str,
     default="7b",
@@ -151,7 +158,7 @@ else:
         distr_param = None
 
 model = get_model(
-    "paged_llama",
+    f"paged_{args.architecture}",
     args.variant,
     model_path=args.model_path,
     checkpoint_sharding=args.checkpoint_sharding,
@@ -159,7 +166,6 @@ model = get_model(
     source=args.model_source,
     distributed_strategy=distr_param,
     group=dist.group.WORLD,
-    norm_eps=1e-6,
 )
 decode_model = None
 
@@ -174,7 +180,7 @@ if args.speculator_path is not None:
     if is_local:
         speculator = get_model(
             "mlp_speculator",
-            f"llama.{args.variant}.{args.speculator_variant}",
+            f"{args.architecture}.{args.variant}.{args.speculator_variant}",
             model_path=args.speculator_path,
             source=args.speculator_source,
             device_type=args.device_type,
