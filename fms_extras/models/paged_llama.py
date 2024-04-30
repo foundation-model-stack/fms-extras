@@ -742,7 +742,9 @@ _8b_llama3_config = PagedLLaMAConfig(
     max_expected_seq_len=8192,
 )
 
-models.register_model("paged_llama", "8b", _llama_factory_factory((_8b_llama3_config)))
+models.register_model(
+    _architecture_name, "8b", _llama_factory_factory((_8b_llama3_config))
+)
 
 
 def _rename_weights_to_fms(orig_sd):
