@@ -742,7 +742,7 @@ _8b_llama3_config = PagedLLaMAConfig(
     max_expected_seq_len=8192,
 )
 
-models.register_model("paged_llama3", "8b", _llama_factory_factory((_8b_llama3_config)))
+models.register_model("paged_llama", "8b", _llama_factory_factory((_8b_llama3_config)))
 
 
 def _rename_weights_to_fms(orig_sd):
@@ -889,4 +889,3 @@ serialization.register_adapter(_architecture_name, "hf", _hf_sd_to_fms_sd)
 serialization.register_adapter(
     _architecture_name, "fms_llama", _rename_fms_weights_to_fms_paged
 )
-serialization.register_adapter("paged_llama3", "hf", _hf_sd_to_fms_sd)
