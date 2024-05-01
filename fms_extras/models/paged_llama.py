@@ -743,7 +743,7 @@ _8b_llama3_config = PagedLLaMAConfig(
 )
 
 models.register_model(
-    _architecture_name, "8b", _llama_factory_factory((_8b_llama3_config))
+    _architecture_name, "llama3.8b", _llama_factory_factory((_8b_llama3_config))
 )
 
 

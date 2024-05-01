@@ -318,7 +318,7 @@ models.register_model(
 
 models.register_model(
     _architecture_name,
-    "llama.8b.3_2b",
+    "llama.llama3.8b.3_2b",
     _mlp_speculator_factory_factory(_llama3_8b_3_2b),
 )
 
