@@ -159,7 +159,6 @@ model = get_model(
     source=args.model_source,
     distributed_strategy=distr_param,
     group=dist.group.WORLD,
-    norm_eps=1e-6,
 )
 decode_model = None
 
