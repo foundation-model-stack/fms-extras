@@ -1,7 +1,7 @@
 import math
 import re
 from dataclasses import dataclass
-from typing import List, Mapping, Optional, Tuple, Union
+from typing import Dict, List, Mapping, Optional, Set, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -288,14 +288,54 @@ class TPPagedMultiHeadAttention(PagedMultiHeadAttention, TPModule):
             position_encoder,
             gain,
         )
+        self.pre_tp_nheads = nheads
+        self.pre_tp_kvheads = kvheads
         self.setup_tp(rank, world_size)
 
-    def colwise_param_names(self) -> List[str]:
-        colwise_weights = ["qkv_fused"]
-        return colwise_weights
+    def load_weights(
+        self,
+        tensor_values: Dict[str, torch.Tensor],
+    ):
+        # 1. Grab the weights from tensor_values
+        used_keys: Set[str] = set()
+        qkv_weight = self._get_sd_weight(
+            tensor_values, used_keys, ["qkv_fused", "weight"]
+        )
+        dense_weight = self._get_sd_weight(
+            tensor_values, used_keys, ["dense", "weight"]
+        )
+        if self.use_bias:
+            qkv_bias = self._get_sd_weight(
+                tensor_values, used_keys, ["qkv_fused", "bias"]
+            )
+            dense_bias = self._get_sd_weight(
+                tensor_values, used_keys, ["dense", "bias"]
+            )
 
-    def rowwise_param_names(self) -> List[str]:
-        return ["dense"]
+        # 2. Raise exceptions
+        if len(tensor_values) > (4 if self.use_bias else 2):
+            unused_keys = set(tensor_values.keys()).difference(used_keys)
+            raise AttributeError(f"Unused weight(s): {', '.join(unused_keys)}")
+
+        # 3. Load and shard the weights
+        # The number in max_partition_sizes will signify the largest world size
+        # til we need to duplicate.  For instance if we have nheads=16 and
+        # world_size=32, then first 2 ranks will get first 1/16th of query
+        self.sharded_copy(
+            self.qkv_fused.weight,
+            qkv_weight,
+            0,
+            [self.pre_tp_nheads, self.pre_tp_kvheads, self.pre_tp_kvheads],
+        )
+        self.sharded_copy(self.dense.weight, dense_weight, 1, [self.world_size])
+        if self.use_bias:
+            self.sharded_copy(
+                self.qkv_fused.bias,
+                qkv_bias,
+                0,
+                [self.pre_tp_nheads, self.pre_tp_kvheads, self.pre_tp_kvheads],
+            )
+            self.sharded_copy(self.dense.bias, dense_bias, 1, [self.world_size], False)
 
     @staticmethod
     def import_module(
@@ -792,7 +832,7 @@ def _rename_weights_to_fms(orig_sd):
 
 def _hf_sd_to_fms_sd(hf_sd: Mapping) -> Mapping:
     replacements = [
-        (r"^lm_head.weight", "head.head.weight"),
+        (r"^lm_head.weight", "headless_model.shared.head.weight"),
         (r"^model.embed_tokens.weight", "headless_model.shared.emb.weight"),
         (r"^model.norm", "headless_model.dec_norm"),
         (r"^model.layers", "headless_model.layers"),
@@ -820,6 +860,7 @@ def _hf_sd_to_fms_sd(hf_sd: Mapping) -> Mapping:
             or "attn.key" in new_name
             or "attn.value" in new_name
         ):
+            del new_sd[new_name]
             unfused_weights = [
                 re.sub(r"self_attn\.[kvq]_proj", "self_attn.q_proj", name),
                 re.sub(r"self_attn\.[kvq]_proj", "self_attn.k_proj", name),

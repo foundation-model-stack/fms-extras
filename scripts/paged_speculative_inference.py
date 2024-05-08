@@ -140,6 +140,7 @@ if args.deterministic:
 
 if args.distributed:
     dist.init_process_group()
+    torch._C._distributed_c10d._register_process_group("default", dist.group.WORLD)
 
 print("loading model")
 if args.distributed:
