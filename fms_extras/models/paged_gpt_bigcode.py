@@ -246,7 +246,7 @@ class PagedGPTBigCode(nn.Module):
         # this model ties weights, so we tie here
         self.head.weight = self.base_model.embedding.weight
 
-        self.reset_params()
+        self.reset_parameters()
 
     @classmethod
     def from_config(cls, config: PagedGPTBigCodeConfig) -> "PagedGPTBigCode":
