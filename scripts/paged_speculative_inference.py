@@ -216,7 +216,7 @@ kv_cache_manager = PagedKVCacheManager(
     model.config.nlayers,
     model.config.nheads,
     model.config.emb_dim,
-    kv_heads=model.config.kvheads,
+    kv_heads=kv_heads,
     tensor_parallel_size=dist.get_world_size() if args.distributed else 1,
     dtype=torch.get_default_dtype(),
     device=device,
