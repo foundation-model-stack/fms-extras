@@ -429,8 +429,7 @@ def __generate_targets(
 
     # Composite greedy and non greedy outputs
     greedy = logits.argmax(-1)
-    mask = do_sample[:, None, None].int()
-    return samples * mask + (1 - mask) * greedy
+    return torch.where(do_sample[:, None, None], samples, greedy)
 
 
 def speculative_generate(
