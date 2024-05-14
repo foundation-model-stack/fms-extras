@@ -63,7 +63,7 @@ class MLPSpeculator(nn.Module):
         )
         # Weights ensure that state_0 accounts for 50% of state magnitude by final head in expectation
         self.state_weight = 0.5 ** (0.5 / n_predict)
-        self.emb_weight = math.sqrt(1 - self.state_weight**2)
+        self.emb_weight = math.sqrt((1 - self.state_weight**2) * (self.inner_dim / 2))
         self.activation = nn.GELU()
 
     def reset_parameters(self):
@@ -106,33 +106,40 @@ class MLPSpeculator(nn.Module):
         # k indicates # of candidates
         # h indicates # of generated tokens
         b = state.size(0)
-        out = torch.empty(b, 1, 0, device=state.device).int()  # b k h
-        log_probs = torch.zeros(b, 1, device=state.device)  # b k
+        k = math.prod(topk)
+        out = torch.empty(
+            b, 1, k, self.n_predict, device=state.device
+        ).int()  # b 1 k h -> b k 1 h
+        log_probs = torch.zeros(b, 1, k, device=state.device)  # b 1 k -> b k 1
         assert (
             len(topk) == self.n_predict
         ), f"You must provide a topk number for each head ({self.n_predict} heads, {len(topk)} provided)"
         for i in range(self.n_predict):
             # Project and predict
-            z = self.emb[i](ind)
-            z = z.mul(self.emb_weight * math.sqrt(self.inner_dim / 2))  # b k d
-            state = self.proj[i](state) * self.state_weight + z
+            z = self.emb[i](ind)  # b k d
+            state = self.proj[i](state)
+            # Weighted add of state_weight*state and emb_weight*z
+            # Let subsequent LN take care of denominator
+            # state_weight is close to 1, so shouldn't be any precision issues
+            state = torch.add(state, z, alpha=self.emb_weight / self.state_weight)
             state = self.activation(self.ln[i](state))  # b k d
             probs = F.log_softmax(self.head[i](state), dim=2)  # b k v
             probs, preds = probs.topk(topk[i], dim=2)  # b k k'
 
-            # Update candidate set with new predictions
-            out = out.unsqueeze(2).expand(-1, -1, topk[i], -1)  # b k k' h
-            out = torch.cat([out, preds.unsqueeze(3)], dim=3)  # b k k' h+1
-            out = out.view(b, -1, i + 1)  # b kk' h+1
+            # Update candidate set with new predictions, repeating shared prefixes as needed
+            out = out.view(b, preds.size(1) * preds.size(2), -1, self.n_predict)
+            out[:, :, :, i] = preds.view(b, -1, 1)
 
             # Update state, log_probs and ind for new predictions
             state = state.unsqueeze(2).expand(-1, -1, topk[i], -1)  # b k k' d
             state = state.reshape(b, -1, state.size(3))  # b kk' d
             ind = preds.view(b, -1)  # b kk'
-            log_probs = log_probs.unsqueeze(2).expand(b, -1, topk[i])  # b k k'
-            log_probs = log_probs.add(probs).reshape(b, -1)  # b kk'
+            log_probs = log_probs.view(b, probs.size(1) * probs.size(2), -1)
+            log_probs = log_probs.add(probs.view(b, -1, 1))
 
         # Take only top n best guesses
+        out = out.view(b, k, self.n_predict)
+        log_probs = log_probs.view(b, k)
         best_guesses = log_probs.topk(n, dim=1)[1]  # b k
         return out.gather(
             1, best_guesses.unsqueeze(2).expand(-1, -1, self.n_predict)
@@ -166,9 +173,12 @@ class MLPSpeculator(nn.Module):
         """
         out = []
         for i in range(self.n_predict):
-            z = self.emb[i](inds[:, i : i + state.size(1)])
-            z = z.mul(self.emb_weight * math.sqrt(self.inner_dim / 2))  # b n d
-            state = self.proj[i](state) * self.state_weight + z
+            z = self.emb[i](inds[:, i : i + state.size(1)])  # b n d
+            state = self.proj[i](state)
+            # Weighted add of state_weight*state and emb_weight*z
+            # Let subsequent LN take care of denominator
+            # state_weight is close to 1, so shouldn't be any precision issues
+            state = torch.add(state, z, alpha=self.emb_weight / self.state_weight)
             state = self.activation(self.ln[i](state))  # b n d
             out.append(self.head[i](state))  # b n v
         return torch.stack(out, dim=0)  # h b n v
