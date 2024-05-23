@@ -83,8 +83,8 @@ class MLPSpeculator(nn.Module):
         self.ln0 = LayerNormParameterized(emb_dim, elementwise_shift=False, elementwise_scale=False)
         self.heads = nn.ModuleList(
             [
-                MLPSpeculatorLayer(emb_dim, inner_dim, vocab_size, 0.5 ** (0.5 / n_predict)) 
-                for _ in range(n_predict)
+                MLPSpeculatorLayer(emb_dim if i==0 else inner_dim, inner_dim, vocab_size, 0.5 ** (0.5 / n_predict)) 
+                for i in range(n_predict)
             ]
         )
         self.n_predict = n_predict
