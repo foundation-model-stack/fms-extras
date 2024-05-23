@@ -43,7 +43,7 @@ class MLPSpeculatorLayer(nn.Module):
         return out, state
 
 
-class MLPSpeculator2(nn.Module):
+class MLPSpeculator(nn.Module):
     """
     This is a simple MLP-based speculator that functions similarly to Medusa
     (https://arxiv.org/abs/2401.10774), ingesting context via the final embedding
