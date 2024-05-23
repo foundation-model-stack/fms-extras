@@ -9,7 +9,41 @@ from fms.modules.layernorm import LayerNormParameterized
 from fms.utils import serialization
 
 
-class MLPSpeculator(nn.Module):
+class MLPSpeculatorLayer(nn.Module):
+    def __init__(self, in_dim, out_dim, vsize, state_weight):
+        super().__init__()
+        self.emb = nn.Embedding(vsize, out_dim)
+        self.proj = nn.Linear(in_dim, out_dim)
+        self.head = nn.Linear(out_dim, vsize, bias=False)
+        self.ln = LayerNormParameterized(out_dim, elementwise_shift=True, elementwise_scale=True)
+        self.state_weight = state_weight
+        self.emb_weight = math.sqrt((1 - self.state_weight**2) * (out_dim / 2))
+        self.d = out_dim
+        self.activation = nn.GELU()
+        self.loss = nn.CrossEntropyLoss()
+        
+    def reset_parameters(self):
+        for m in ["emb", "head"]:
+            nn.init.trunc_normal_(getattr(self, m).weight, 0, 1 / math.sqrt(self.d))
+        nn.init.trunc_normal_(self.proj.weight, 0, 1 / math.sqrt(self.proj.weight.size(1)))
+        self.ln.weight.data.fill_(1)
+        self.ln.bias.data.zero_()
+        
+    def forward(self, state, inds, targs=None):
+        # state: b n d
+        # inds: b n
+        # targs: b n
+        z = self.emb(inds)
+        state = self.proj(state)
+        state = torch.add(state, z, alpha=self.emb_weight / self.state_weight)
+        state = self.activation(self.ln(state))
+        out = self.head(state)  # b n v
+        if targs is not None:
+            out = self.loss(out.reshape(-1, out.size(-1)), targs.long().reshape(-1))
+        return out, state
+
+
+class MLPSpeculator2(nn.Module):
     """
     This is a simple MLP-based speculator that functions similarly to Medusa
     (https://arxiv.org/abs/2401.10774), ingesting context via the final embedding
@@ -32,47 +66,45 @@ class MLPSpeculator(nn.Module):
         Number of entries in the tokenizer associated with the base model.
     n_predict : int
         Number of heads / number of tokens to guess ahead. Model size and speed scale with this value.
+    tie_weights : bool
+        If true, use a single set of weights for every model head/stage after the first.
+        The initial projection from the base model may have a different size, so that stays separate.
     """
 
-    def __init__(self, emb_dim=4096, inner_dim=0, vocab_size=32000, n_predict=3):
+    def __init__(
+        self,
+        emb_dim=4096,
+        inner_dim=0,
+        vocab_size=32000,
+        n_predict=3,
+        tie_weights=True,
+    ):
         super().__init__()
-        self.n_predict = n_predict
-        self.emb_dim = emb_dim
-        inner_dim = inner_dim if inner_dim != 0 else emb_dim
-        self.inner_dim = inner_dim
-        self.vsize = vocab_size
-        self.emb = nn.ModuleList(
-            [nn.Embedding(vocab_size, inner_dim) for _ in range(n_predict)]
-        )
-        self.proj = nn.ModuleList(
+        self.ln0 = LayerNormParameterized(emb_dim, elementwise_shift=False, elementwise_scale=False)
+        self.heads = nn.ModuleList(
             [
-                nn.Linear((emb_dim if i == 0 else inner_dim), inner_dim, bias=False)
-                for i in range(n_predict)
-            ]
-        )
-        self.head = nn.ModuleList(
-            [nn.Linear(inner_dim, vocab_size, bias=False) for _ in range(n_predict)]
-        )
-        self.ln = nn.ModuleList(
-            [
-                LayerNormParameterized(
-                    inner_dim, elementwise_shift=True, elementwise_scale=True
-                )
+                MLPSpeculatorLayer(emb_dim, inner_dim, vocab_size, 0.5 ** (0.5 / n_predict)) 
                 for _ in range(n_predict)
             ]
         )
-        # Weights ensure that state_0 accounts for 50% of state magnitude by final head in expectation
-        self.state_weight = 0.5 ** (0.5 / n_predict)
-        self.emb_weight = math.sqrt((1 - self.state_weight**2) * (self.inner_dim / 2))
-        self.activation = nn.GELU()
+        self.n_predict = n_predict
+
+        # Handle weight tying as specified
+        if tie_weights:
+            assert (
+                n_predict > 1
+            ), "You cannot tie weights between stages when only 1 exists"
+            for i in range(1, n_predict):
+                self.heads[i].emb.weight = self.heads[i-1].emb.weight
+                self.heads[i].head.weight = self.heads[i-1].head.weight
+                self.heads[i].ln.weight = self.heads[i-1].ln.weight
+                self.heads[i].ln.bias = self.heads[i-1].ln.bias
+                if i > 1:
+                    self.heads[i].proj.weight = self.heads[i-1].proj.weight
 
     def reset_parameters(self):
-        for m in self.modules():
-            if isinstance(m, nn.Embedding) or isinstance(m, nn.Linear):
-                nn.init.trunc_normal_(m.weight, 0, 1 / math.sqrt(self.inner_dim))
-            elif isinstance(m, LayerNormParameterized):
-                m.weight.data.fill_(1)
-                m.bias.data.zero_()
+        for m in self.heads:
+            m.reset_parameters()
 
     def generate_suffixes(
         self,
@@ -114,16 +146,11 @@ class MLPSpeculator(nn.Module):
         assert (
             len(topk) == self.n_predict
         ), f"You must provide a topk number for each head ({self.n_predict} heads, {len(topk)} provided)"
+        state = self.ln0(state) / 2**.5
         for i in range(self.n_predict):
             # Project and predict
-            z = self.emb[i](ind)  # b k d
-            state = self.proj[i](state)
-            # Weighted add of state_weight*state and emb_weight*z
-            # Let subsequent LN take care of denominator
-            # state_weight is close to 1, so shouldn't be any precision issues
-            state = torch.add(state, z, alpha=self.emb_weight / self.state_weight)
-            state = self.activation(self.ln[i](state))  # b k d
-            probs = F.log_softmax(self.head[i](state), dim=2)  # b k v
+            probs, state = self.heads[i](state, ind)
+            probs = F.log_softmax(probs, dim=2)  # b k v
             probs, preds = probs.topk(topk[i], dim=2)  # b k k'
 
             # Update candidate set with new predictions, repeating shared prefixes as needed
@@ -153,8 +180,8 @@ class MLPSpeculator(nn.Module):
         """
         FOR TRAINING
         A parallel forward pass on pre-existing ground-truth tokens in pretraining contexts.
-        Produces self.n_predict predicted tokens for each token embedding in state.
-        Inds requires self.n_predict extra tokens on the right to "simulate" recursive
+        Produces self.n_predict predicted tokens for each token embedding in state, and calculates losses.
+        Inds requires self.n_predict+1 extra tokens on the right to "simulate" recursive
         behavior for end positions.
         ...
         Args
@@ -165,23 +192,22 @@ class MLPSpeculator(nn.Module):
         inds : torch.Tensor
             Ground-truth token indices. inds[:,i] is the prediction coming from state[:,i]
             (or the legal fiction ground truth corresponding to that prediction).
-            Expects size [b n+self.n_predict].
+            Expects size [b n+self.n_predict+1].
         ...
         Output : torch.Tensor
-            Prediction logits at each position, for each head of the speculator.
-            Has size [self.n_predict b n v] where v is vocab size.
+            Aggregate prediction losses for each head of the speculator.
+            Has size [self.n_predict].
         """
         out = []
+        state = self.ln0(state) / 2**.5
         for i in range(self.n_predict):
-            z = self.emb[i](inds[:, i : i + state.size(1)])  # b n d
-            state = self.proj[i](state)
-            # Weighted add of state_weight*state and emb_weight*z
-            # Let subsequent LN take care of denominator
-            # state_weight is close to 1, so shouldn't be any precision issues
-            state = torch.add(state, z, alpha=self.emb_weight / self.state_weight)
-            state = self.activation(self.ln[i](state))  # b n d
-            out.append(self.head[i](state))  # b n v
-        return torch.stack(out, dim=0)  # h b n v
+            loss, state = self.heads[i](
+                state, 
+                inds[:, i : i + state.size(1)],
+                inds[:, i + 1 : i + 1 + state.size(1)],
+            )  # 1, b n d
+            out.append(loss)
+        return torch.stack(out, dim=0)  # h
 
 
 def apply_index_map(
