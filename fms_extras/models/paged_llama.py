@@ -56,6 +56,9 @@ class PagedLLaMAConfig(ModelConfig):
     max_expected_seq_len: int = 4096
     ntk_scaling: bool = False
     rope_theta: int = 10_000
+    attn_bias: bool = False
+    mlp_bias: bool = False
+    tie_heads: bool = False
 
 
 class PagedLLaMABlock(nn.Module):
@@ -95,7 +98,7 @@ class PagedLLaMABlock(nn.Module):
             self.config.nheads,
             kvheads,
             p_dropout=self.config.p_dropout,
-            use_bias=False,
+            use_bias=self.config.attn_bias,
             position_encoder=rotary_emb,
         )
         self.ff_sub_layer = GatedLinearUnit(
@@ -104,7 +107,7 @@ class PagedLLaMABlock(nn.Module):
             multiple_of=self.config.multiple_of,
             activation_fn=str_to_activation(self.config.activation_fn),
             p_dropout=self.config.p_dropout,
-            use_bias=False,
+            use_bias=self.config.mlp_bias,
         )
 
         if self.config.p_dropout != 0:
@@ -170,7 +173,7 @@ class PagedLLaMAHeadless(nn.Module):
             padding_idx=self.config.pad_id,
             abs_pos=False,
             reversible=True,
-            tie_weights=False,
+            tie_weights=self.config.tie_heads,
             bias=False,
         )
         self.shared = self.distributed_strategy.distribute_module(shared)
@@ -447,6 +450,29 @@ models.register_model(
     _architecture_name, "llama3.8b", _llama_factory_factory((_8b_llama3_config))
 )
 
+# calico
+
+_8b_calico_code_config = PagedLLaMAConfig(
+    src_vocab_size=49152,
+    emb_dim=4096,
+    nheads=32,
+    kvheads=8,
+    nlayers=36,
+    pad_id=0,
+    hidden_grow_factor=14336 / 4096,
+    multiple_of=1,
+    max_expected_seq_len=4096,
+    attn_bias=True,
+    mlp_bias=True,
+    tie_heads=True,
+)
+
+models.register_model(
+    _architecture_name,
+    "calico.8b.code",
+    _llama_factory_factory((_8b_calico_code_config)),
+)
+
 
 def _rename_weights_to_fms(orig_sd):
     replacements = [
@@ -520,7 +546,7 @@ def _hf_sd_to_fms_sd(hf_sd: Mapping) -> Mapping:
             "attn.query" in new_name
             or "attn.key" in new_name
             or "attn.value" in new_name
-        ):
+        ) and "weight" in new_name:
             del new_sd[new_name]
             unfused_weights = [
                 re.sub(r"self_attn\.[kvq]_proj", "self_attn.q_proj", name),
@@ -548,6 +574,40 @@ def _hf_sd_to_fms_sd(hf_sd: Mapping) -> Mapping:
                     .transpose(1, 2)
                     .reshape(*temp.size())
                 )
+
+                raw_mapping[unfused_weight_key] = temp
+
+            new_sd[
+                re.sub(r"attn.(query|key|value)", "attn.qkv_fused", new_name)
+            ] = torch.cat([raw_mapping[w] for w in unfused_weights], dim=0)
+        elif (
+            "attn.query" in new_name
+            or "attn.key" in new_name
+            or "attn.value" in new_name
+        ) and "bias" in new_name:
+            del new_sd[new_name]
+            unfused_weights = [
+                re.sub(r"self_attn\.[kvq]_proj", "self_attn.q_proj", name),
+                re.sub(r"self_attn\.[kvq]_proj", "self_attn.k_proj", name),
+                re.sub(r"self_attn\.[kvq]_proj", "self_attn.v_proj", name),
+            ]
+            missing_weights = [w for w in unfused_weights if w not in hf_sd.keys()]
+            if len(missing_weights) != 0:
+                raise ValueError(
+                    f"The following weights are required for properly fusing: {missing_weights}"
+                )
+
+            raw_mapping = {w: hf_sd[w] for w in unfused_weights}
+
+            # q=0, k=1
+            for unfused_weight_key in unfused_weights[:2]:
+                temp = raw_mapping[unfused_weight_key]
+                # nheads is used in the transformation required for hf->fms
+                # here we are using 128 as this value fits with all popular models
+                #   7B, 13B, 70B to recover the number of heads
+                nheads = int(temp.size(0) / 128)
+
+                temp = temp.view(nheads, 2, -1).transpose(1, 2).reshape(*temp.size())
 
                 raw_mapping[unfused_weight_key] = temp
 
