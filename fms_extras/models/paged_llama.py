@@ -24,6 +24,7 @@ from fms.modules.tp import TPModule
 from fms.utils import serialization
 from fms.utils.activation import str_to_activation
 from fms.utils.config import ModelConfig
+from fms.utils.serialization import _legacy_mlp_glu_unfused_to_fused_adapter
 from torch._C._distributed_c10d import ProcessGroup
 
 from fms_extras.utils.cache.paged import (
@@ -827,6 +828,8 @@ def _rename_weights_to_fms(orig_sd):
                 re.sub(r"attn.(query|key|value)", "attn.qkv_fused", new_name)
             ] = torch.cat([orig_sd[w] for w in unfused_weights], dim=0)
 
+    new_sd = _legacy_mlp_glu_unfused_to_fused_adapter(new_sd)
+
     return new_sd
 
 
@@ -894,6 +897,8 @@ def _hf_sd_to_fms_sd(hf_sd: Mapping) -> Mapping:
                 re.sub(r"attn.(query|key|value)", "attn.qkv_fused", new_name)
             ] = torch.cat([raw_mapping[w] for w in unfused_weights], dim=0)
 
+    new_sd = _legacy_mlp_glu_unfused_to_fused_adapter(new_sd)
+
     return new_sd
 
 
@@ -923,6 +928,8 @@ def _rename_fms_weights_to_fms_paged(orig_sd):
             new_sd[
                 re.sub(r"attn.(query|key|value)", "attn.qkv_fused", new_name)
             ] = torch.cat([orig_sd[w] for w in unfused_weights], dim=0)
+
+    new_sd = _legacy_mlp_glu_unfused_to_fused_adapter(new_sd)
 
     return new_sd
 
