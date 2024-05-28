@@ -24,6 +24,7 @@ from fms.modules.tp import TPModule
 from fms.utils import serialization
 from fms.utils.activation import str_to_activation
 from fms.utils.config import ModelConfig
+from fms.utils.serialization import _legacy_mlp_glu_unfused_to_fused_adapter
 from torch._C._distributed_c10d import ProcessGroup
 
 from fms_extras.utils.cache.paged import (
@@ -827,6 +828,8 @@ def _rename_weights_to_fms(orig_sd):
                 re.sub(r"attn.(query|key|value)", "attn.qkv_fused", new_name)
             ] = torch.cat([orig_sd[w] for w in unfused_weights], dim=0)
 
+    new_sd = _legacy_mlp_glu_unfused_to_fused_adapter(new_sd)
+
     return new_sd
 
 
@@ -894,35 +897,21 @@ def _hf_sd_to_fms_sd(hf_sd: Mapping) -> Mapping:
                 re.sub(r"attn.(query|key|value)", "attn.qkv_fused", new_name)
             ] = torch.cat([raw_mapping[w] for w in unfused_weights], dim=0)
 
+    new_sd = _legacy_mlp_glu_unfused_to_fused_adapter(new_sd)
+
     return new_sd
 
 
 def _rename_fms_weights_to_fms_paged(orig_sd):
+    replacements = [
+        (r"attn\.in_proj\.qkv_fused\.weight", "attn.qkv_fused.weight"),
+    ]
     new_sd = {}
     for name, param in orig_sd.items():
         new_name = f"headless_model.{name}"
+        for pattern, repl in replacements:
+            new_name = re.sub(pattern, repl, new_name)
         new_sd[new_name] = param
-
-        # llama in meta has unfused qkv attn weights, so these weights must be converted to fused weights in fms
-        if (
-            "attn.query" in new_name
-            or "attn.key" in new_name
-            or "attn.value" in new_name
-        ):
-            unfused_weights = [
-                re.sub(r"attn.(query|key|value)", "attn.query", name),
-                re.sub(r"attn.(query|key|value)", "attn.key", name),
-                re.sub(r"attn.(query|key|value)", "attn.value", name),
-            ]
-            missing_weights = [w for w in unfused_weights if w not in orig_sd.keys()]
-            if len(missing_weights) != 0:
-                raise ValueError(
-                    f"The following weights are required for properly fusing: {missing_weights}"
-                )
-
-            new_sd[
-                re.sub(r"attn.(query|key|value)", "attn.qkv_fused", new_name)
-            ] = torch.cat([orig_sd[w] for w in unfused_weights], dim=0)
 
     return new_sd
 
