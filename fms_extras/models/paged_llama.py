@@ -473,6 +473,26 @@ models.register_model(
     _llama_factory_factory((_8b_calico_code_config)),
 )
 
+_3b_calico_code_config = PagedLLaMAConfig(
+    src_vocab_size=49152,
+    emb_dim=2560,
+    nheads=32,
+    kvheads=32,
+    nlayers=32,
+    pad_id=0,
+    hidden_grow_factor=10240 / 2560,
+    multiple_of=1,
+    max_expected_seq_len=2048,
+    attn_bias=True,
+    mlp_bias=True,
+    tie_heads=True,
+)
+
+models.register_model(
+    _architecture_name,
+    "calico.3b.code",
+    _llama_factory_factory((_3b_calico_code_config)),
+)
 
 def _rename_weights_to_fms(orig_sd):
     replacements = [
@@ -564,10 +584,17 @@ def _hf_sd_to_fms_sd(hf_sd: Mapping) -> Mapping:
             # q=0, k=1
             for unfused_weight_key in unfused_weights[:2]:
                 temp = raw_mapping[unfused_weight_key]
+
+                emb_dim = param.size(1)
+                if emb_dim == 2560:
+                    head_size = 80
+                else:
+                    head_size = 128
+
                 # nheads is used in the transformation required for hf->fms
                 # here we are using 128 as this value fits with all popular models
                 #   7B, 13B, 70B to recover the number of heads
-                nheads = int(temp.size(0) / 128)
+                nheads = int(temp.size(0) / head_size)
 
                 temp = (
                     temp.view(nheads, 2, -1, temp.size(1))
@@ -602,10 +629,18 @@ def _hf_sd_to_fms_sd(hf_sd: Mapping) -> Mapping:
             # q=0, k=1
             for unfused_weight_key in unfused_weights[:2]:
                 temp = raw_mapping[unfused_weight_key]
+
+                weight_name = name.replace("bias", "weight")
+                emb_dim = hf_sd[weight_name].size(1)
+                if emb_dim == 2560:
+                    head_size = 80
+                else:
+                    head_size = 128
+
                 # nheads is used in the transformation required for hf->fms
                 # here we are using 128 as this value fits with all popular models
                 #   7B, 13B, 70B to recover the number of heads
-                nheads = int(temp.size(0) / 128)
+                nheads = int(temp.size(0) / head_size)
 
                 temp = temp.view(nheads, 2, -1).transpose(1, 2).reshape(*temp.size())
 
