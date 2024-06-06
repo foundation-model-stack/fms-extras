@@ -494,6 +494,7 @@ models.register_model(
     _llama_factory_factory((_3b_calico_code_config)),
 )
 
+
 def _rename_weights_to_fms(orig_sd):
     replacements = [
         (r"^tok_embeddings", "headless_model.shared.emb"),
