@@ -79,7 +79,7 @@ class MLPSpeculator(nn.Module):
                 for _ in range(n_predict)
             ]
         )
-        if scale_input:
+        if self.scale_input:
             self.ln0 = LayerNormParameterized(
                 emb_dim, elementwise_shift=False, elementwise_scale=False
             )
@@ -209,7 +209,7 @@ class MLPSpeculator(nn.Module):
             Has size [self.n_predict b n v] where v is vocab size.
         """
         out = []
-        if scale_input:
+        if self.scale_input:
             state = self.ln0(state) / (2**0.5)
         for i in range(self.n_predict):
             z = self.emb[i](inds[:, i : i + state.size(1)])
