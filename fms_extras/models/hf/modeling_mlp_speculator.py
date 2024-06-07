@@ -22,6 +22,7 @@ class MLPSpeculatorConfig(PretrainedConfig):
         n_predict: int = 3,
         top_k_tokens_per_head: List[int] = [5, 4, 3],
         n_candidates: int = 5,
+        scale_input: bool = False,
         **kwargs
     ):
         """
@@ -49,6 +50,7 @@ class MLPSpeculatorConfig(PretrainedConfig):
         self.n_predict = n_predict
         self.top_k_tokens_per_head = top_k_tokens_per_head
         self.n_candidates = n_candidates
+        self.scale_input = scale_input
         super().__init__(**kwargs)
 
 
@@ -83,6 +85,7 @@ class MLPSpeculatorPreTrainedModel(PreTrainedModel):
         model: MLPSpeculator,
         top_k_tokens_per_head: List[int],
         n_candidates: int,
+        scale_input: bool,
         *args,
         **kwargs
     ):
@@ -93,6 +96,7 @@ class MLPSpeculatorPreTrainedModel(PreTrainedModel):
             n_predict=model.n_predict,
             top_k_tokens_per_head=top_k_tokens_per_head,
             n_candidates=n_candidates,
+            scale_input=scale_input,
         )
         return cls(config, model)
 
