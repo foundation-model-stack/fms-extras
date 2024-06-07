@@ -50,6 +50,7 @@ class MLPSpeculator(nn.Module):
         tie_emb=False,
         tie_head=False,
         tie_transition=False,
+        scale_input=False,
     ):
         super().__init__()
         self.n_predict = n_predict
@@ -57,6 +58,7 @@ class MLPSpeculator(nn.Module):
         inner_dim = inner_dim if inner_dim != 0 else emb_dim
         self.inner_dim = inner_dim
         self.vsize = vocab_size
+        self.scale_input = scale_input
         self.emb = nn.ModuleList(
             [nn.Embedding(vocab_size, inner_dim) for _ in range(n_predict)]
         )
@@ -77,9 +79,10 @@ class MLPSpeculator(nn.Module):
                 for _ in range(n_predict)
             ]
         )
-        self.ln0 = LayerNormParameterized(
-            emb_dim, elementwise_shift=False, elementwise_scale=False
-        )
+        if scale_input:
+            self.ln0 = LayerNormParameterized(
+                emb_dim, elementwise_shift=False, elementwise_scale=False
+            )
         # Weights ensure that state_0 accounts for 50% of state magnitude by final head in expectation
         self.state_weight = 0.5 ** (0.5 / n_predict)
         self.emb_weight = math.sqrt(1 - self.state_weight**2)
@@ -150,6 +153,8 @@ class MLPSpeculator(nn.Module):
         assert (
             len(topk) == self.n_predict
         ), f"You must provide a topk number for each head ({self.n_predict} heads, {len(topk)} provided)"
+        if self.scale_input:
+            state = self.ln0(state) / (2**0.5)
         for i in range(self.n_predict):
             # Project and predict
             z = self.emb[i](ind)
@@ -204,7 +209,8 @@ class MLPSpeculator(nn.Module):
             Has size [self.n_predict b n v] where v is vocab size.
         """
         out = []
-        state = self.ln0(state) / (2**0.5)
+        if scale_input:
+            state = self.ln0(state) / (2**0.5)
         for i in range(self.n_predict):
             z = self.emb[i](inds[:, i : i + state.size(1)])
             z = z.mul(self.emb_weight * math.sqrt(self.inner_dim / 2))  # b n d
