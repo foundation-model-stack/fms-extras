@@ -50,6 +50,7 @@ class MLPSpeculator(nn.Module):
         tie_emb=False,
         tie_head=False,
         tie_transition=False,
+        tie_wts=False,
         scale_input=False,
     ):
         super().__init__()
@@ -89,6 +90,8 @@ class MLPSpeculator(nn.Module):
         self.activation = nn.GELU()
 
         # Handle weight tying as specified
+        if tie_wts:
+            tie_emb = tie_head = tie_transition = True        
         if tie_emb:
             assert n_predict > 1, "You cannot tie embeddings when only 1 exists"
             for emb in self.emb:
