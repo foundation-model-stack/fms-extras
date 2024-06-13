@@ -91,7 +91,7 @@ class MLPSpeculator(nn.Module):
 
         # Handle weight tying as specified
         if tie_wts:
-            tie_emb = tie_head = tie_transition = True        
+            tie_emb = tie_head = tie_transition = True
         if tie_emb:
             assert n_predict > 1, "You cannot tie embeddings when only 1 exists"
             for emb in self.emb:
@@ -332,7 +332,7 @@ _llama_34b_code = {
     "n_predict": 5,
     "inner_dim": 8192,
     "scale_input": True,
-    "tie_wts": True
+    "tie_wts": True,
 }
 
 _llama3_8b_3_2b = {
@@ -425,6 +425,7 @@ models.register_model(
     "gpt_bigcode.ibm.34b.680m",
     _mlp_speculator_factory_factory(_ibm_34b_code_instruct),
 )
+
 
 def _rename_hf_weights_to_fms(orig_sd):
     new_sd = {}
