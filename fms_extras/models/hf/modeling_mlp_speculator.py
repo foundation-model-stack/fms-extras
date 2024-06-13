@@ -70,10 +70,11 @@ class MLPSpeculatorPreTrainedModel(PreTrainedModel):
             inner_dim=config.inner_dim,
             vocab_size=config.vocab_size,
             n_predict=config.n_predict,
+            scale_input=config.scale_input,
         )
         if speculator is None:
             self.speculator = MLPSpeculator(
-                config.emb_dim, config.inner_dim, config.vocab_size, config.n_predict
+                config.emb_dim, config.inner_dim, config.vocab_size, config.n_predict, scale_input=config.scale_input
             )
             self.speculator.reset_parameters()
         else:
