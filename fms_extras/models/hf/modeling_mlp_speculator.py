@@ -89,8 +89,8 @@ class MLPSpeculatorPreTrainedModel(PreTrainedModel):
         model: MLPSpeculator,
         top_k_tokens_per_head: List[int],
         n_candidates: int,
-        tie_wts: bool,
-        scale_input: bool,
+        tie_wts: bool = False,
+        scale_input: bool = False,
         *args,
         **kwargs
     ):
