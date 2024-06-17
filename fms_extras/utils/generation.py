@@ -593,7 +593,9 @@ def speculative_generate(
         if do_sample:
             do_sample_vector = torch.ones(bsize, device=logits.device, dtype=torch.bool)
         else:
-            do_sample_vector = torch.zeros(bsize, device=logits.device, dtype=torch.bool)
+            do_sample_vector = torch.zeros(
+                bsize, device=logits.device, dtype=torch.bool
+            )
         next_vals = __generate_targets(
             logits, do_sample_vector, temperature=temperature, top_k=top_k
         )
