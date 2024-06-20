@@ -84,7 +84,10 @@ class MLPSpeculator(nn.Module):
 
         # Handle weight tying as specified
         if tie_weights:
-            assert n_predict > 1, "You cannot tie weights between stages when only 1 exists"
+            assert (
+                n_predict > 1
+            ), "You cannot tie weights between stages when only 1 exists"
+
             for emb in self.emb:
                 emb.weight = self.emb[0].weight
 
