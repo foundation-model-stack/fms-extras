@@ -23,6 +23,10 @@ from fms.modules.positions import RotaryEmbedding
 from fms.utils import serialization
 from fms.utils.activation import str_to_activation
 from fms.utils.config import ModelConfig
+from fms.utils.serialization import (
+    _legacy_attn_unfused_to_fused_adapter,
+    _legacy_mlp_glu_unfused_to_fused_adapter,
+)
 from fms.utils.tokenizers import _has_hf, get_tokenizer
 
 
@@ -486,6 +490,9 @@ def _megatron_sd_to_fms_sd(hf_sd: Mapping[Any, Any]) -> Mapping[Any, Any]:
             new_sd[f"{prefix}ff_sub_layer.w1.bias"] = w1
             new_sd[f"{prefix}ff_sub_layer.wg.bias"] = wg
 
+    new_sd = _legacy_mlp_glu_unfused_to_fused_adapter(
+        _legacy_attn_unfused_to_fused_adapter(new_sd)
+    )
     return new_sd
 
 

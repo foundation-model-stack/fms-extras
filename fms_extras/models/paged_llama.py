@@ -1,7 +1,7 @@
 import math
 import re
 from dataclasses import dataclass
-from typing import List, Mapping, Optional, Tuple, Union
+from typing import Dict, List, Mapping, Optional, Set, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -24,6 +24,7 @@ from fms.modules.tp import TPModule
 from fms.utils import serialization
 from fms.utils.activation import str_to_activation
 from fms.utils.config import ModelConfig
+from fms.utils.serialization import _legacy_mlp_glu_unfused_to_fused_adapter
 from torch._C._distributed_c10d import ProcessGroup
 
 from fms_extras.utils.cache.paged import (
@@ -288,14 +289,54 @@ class TPPagedMultiHeadAttention(PagedMultiHeadAttention, TPModule):
             position_encoder,
             gain,
         )
+        self.pre_tp_nheads = nheads
+        self.pre_tp_kvheads = kvheads
         self.setup_tp(rank, world_size)
 
-    def colwise_param_names(self) -> List[str]:
-        colwise_weights = ["qkv_fused"]
-        return colwise_weights
+    def load_weights(
+        self,
+        tensor_values: Dict[str, torch.Tensor],
+    ):
+        # 1. Grab the weights from tensor_values
+        used_keys: Set[str] = set()
+        qkv_weight = self._get_sd_weight(
+            tensor_values, used_keys, ["qkv_fused", "weight"]
+        )
+        dense_weight = self._get_sd_weight(
+            tensor_values, used_keys, ["dense", "weight"]
+        )
+        if self.use_bias:
+            qkv_bias = self._get_sd_weight(
+                tensor_values, used_keys, ["qkv_fused", "bias"]
+            )
+            dense_bias = self._get_sd_weight(
+                tensor_values, used_keys, ["dense", "bias"]
+            )
 
-    def rowwise_param_names(self) -> List[str]:
-        return ["dense"]
+        # 2. Raise exceptions
+        if len(tensor_values) > (4 if self.use_bias else 2):
+            unused_keys = set(tensor_values.keys()).difference(used_keys)
+            raise AttributeError(f"Unused weight(s): {', '.join(unused_keys)}")
+
+        # 3. Load and shard the weights
+        # The number in max_partition_sizes will signify the largest world size
+        # til we need to duplicate.  For instance if we have nheads=16 and
+        # world_size=32, then first 2 ranks will get first 1/16th of query
+        self.sharded_copy(
+            self.qkv_fused.weight,
+            qkv_weight,
+            0,
+            [self.pre_tp_nheads, self.pre_tp_kvheads, self.pre_tp_kvheads],
+        )
+        self.sharded_copy(self.dense.weight, dense_weight, 1, [self.world_size])
+        if self.use_bias:
+            self.sharded_copy(
+                self.qkv_fused.bias,
+                qkv_bias,
+                0,
+                [self.pre_tp_nheads, self.pre_tp_kvheads, self.pre_tp_kvheads],
+            )
+            self.sharded_copy(self.dense.bias, dense_bias, 1, [self.world_size], False)
 
     @staticmethod
     def import_module(
@@ -710,6 +751,8 @@ def _llama_factory_factory(config):
     return factory
 
 
+# llama2
+
 models.register_model(
     _architecture_name, "micro", _llama_factory_factory(_micro_char_config)
 )
@@ -725,6 +768,24 @@ models.register_model(
     _architecture_name, "13b.code", _llama_factory_factory(_13b_code_config)
 )
 models.register_model(_architecture_name, "70b", _llama_factory_factory(_70b_config))
+
+# llama3
+
+_8b_llama3_config = PagedLLaMAConfig(
+    src_vocab_size=128256,
+    emb_dim=4096,
+    norm_eps=1e-5,
+    nheads=32,
+    kvheads=8,
+    nlayers=32,
+    hidden_grow_factor=3.5,
+    multiple_of=1024,
+    max_expected_seq_len=8192,
+)
+
+models.register_model(
+    _architecture_name, "llama3.8b", _llama_factory_factory((_8b_llama3_config))
+)
 
 
 def _rename_weights_to_fms(orig_sd):
@@ -767,12 +828,14 @@ def _rename_weights_to_fms(orig_sd):
                 re.sub(r"attn.(query|key|value)", "attn.qkv_fused", new_name)
             ] = torch.cat([orig_sd[w] for w in unfused_weights], dim=0)
 
+    new_sd = _legacy_mlp_glu_unfused_to_fused_adapter(new_sd)
+
     return new_sd
 
 
 def _hf_sd_to_fms_sd(hf_sd: Mapping) -> Mapping:
     replacements = [
-        (r"^lm_head.weight", "head.head.weight"),
+        (r"^lm_head.weight", "headless_model.shared.head.weight"),
         (r"^model.embed_tokens.weight", "headless_model.shared.emb.weight"),
         (r"^model.norm", "headless_model.dec_norm"),
         (r"^model.layers", "headless_model.layers"),
@@ -800,6 +863,7 @@ def _hf_sd_to_fms_sd(hf_sd: Mapping) -> Mapping:
             or "attn.key" in new_name
             or "attn.value" in new_name
         ):
+            del new_sd[new_name]
             unfused_weights = [
                 re.sub(r"self_attn\.[kvq]_proj", "self_attn.q_proj", name),
                 re.sub(r"self_attn\.[kvq]_proj", "self_attn.k_proj", name),
@@ -833,35 +897,21 @@ def _hf_sd_to_fms_sd(hf_sd: Mapping) -> Mapping:
                 re.sub(r"attn.(query|key|value)", "attn.qkv_fused", new_name)
             ] = torch.cat([raw_mapping[w] for w in unfused_weights], dim=0)
 
+    new_sd = _legacy_mlp_glu_unfused_to_fused_adapter(new_sd)
+
     return new_sd
 
 
 def _rename_fms_weights_to_fms_paged(orig_sd):
+    replacements = [
+        (r"attn\.in_proj\.qkv_fused\.weight", "attn.qkv_fused.weight"),
+    ]
     new_sd = {}
     for name, param in orig_sd.items():
         new_name = f"headless_model.{name}"
+        for pattern, repl in replacements:
+            new_name = re.sub(pattern, repl, new_name)
         new_sd[new_name] = param
-
-        # llama in meta has unfused qkv attn weights, so these weights must be converted to fused weights in fms
-        if (
-            "attn.query" in new_name
-            or "attn.key" in new_name
-            or "attn.value" in new_name
-        ):
-            unfused_weights = [
-                re.sub(r"attn.(query|key|value)", "attn.query", name),
-                re.sub(r"attn.(query|key|value)", "attn.key", name),
-                re.sub(r"attn.(query|key|value)", "attn.value", name),
-            ]
-            missing_weights = [w for w in unfused_weights if w not in orig_sd.keys()]
-            if len(missing_weights) != 0:
-                raise ValueError(
-                    f"The following weights are required for properly fusing: {missing_weights}"
-                )
-
-            new_sd[
-                re.sub(r"attn.(query|key|value)", "attn.qkv_fused", new_name)
-            ] = torch.cat([orig_sd[w] for w in unfused_weights], dim=0)
 
     return new_sd
 

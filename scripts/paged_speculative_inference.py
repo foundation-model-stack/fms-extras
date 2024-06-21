@@ -140,6 +140,7 @@ if args.deterministic:
 
 if args.distributed:
     dist.init_process_group()
+    torch._C._distributed_c10d._register_process_group("default", dist.group.WORLD)
 
 print("loading model")
 if args.distributed:
@@ -159,7 +160,6 @@ model = get_model(
     source=args.model_source,
     distributed_strategy=distr_param,
     group=dist.group.WORLD,
-    norm_eps=1e-6,
 )
 decode_model = None
 
