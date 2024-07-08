@@ -9,8 +9,8 @@ from fms.models import get_model
 from fms.utils import generation, tokenizers
 from torch import distributed as dist
 
+import fms_extras.models.paged_gpt_bigcode
 import fms_extras.models.paged_llama
-from fms_extras.models.hf.modeling_mlp_speculator import MLPSpeculatorPreTrainedModel
 from fms_extras.models.speculator import MLPSpeculator
 from fms_extras.utils.generation import paged_generate, speculative_generate
 
@@ -22,6 +22,12 @@ parser = argparse.ArgumentParser(
     description="Script to run inference on a causal model"
 )
 parser.add_argument("--device_type", type=str, default="cuda")
+parser.add_argument(
+    "--architecture",
+    type=str,
+    default="llama",
+    help="The model architecture to benchmark",
+)
 parser.add_argument(
     "--variant",
     type=str,
@@ -152,7 +158,7 @@ else:
         distr_param = None
 
 model = get_model(
-    "paged_llama",
+    f"paged_{args.architecture}",
     args.variant,
     model_path=args.model_path,
     checkpoint_sharding=args.checkpoint_sharding,
@@ -174,7 +180,7 @@ if args.speculator_path is not None:
     if is_local:
         speculator = get_model(
             "mlp_speculator",
-            f"llama.{args.variant}.{args.speculator_variant}",
+            f"{args.architecture}.{args.variant}.{args.speculator_variant}",
             model_path=args.speculator_path,
             source=args.speculator_source,
             device_type=args.device_type,
@@ -201,22 +207,30 @@ from fms_extras.utils.cache.paged import PagedKVCacheManager
 
 
 use_cache = True
+if hasattr(model.config, "kvheads"):
+    kv_heads = model.config.kvheads
+else:
+    kv_heads = 1 if model.config.multiquery_attn else model.config.nheads
+
 kv_cache_manager = PagedKVCacheManager(
     model.config.nlayers,
     model.config.nheads,
     model.config.emb_dim,
-    kv_heads=model.config.kvheads,
+    kv_heads=kv_heads,
     tensor_parallel_size=dist.get_world_size() if args.distributed else 1,
     dtype=torch.get_default_dtype(),
     device=device,
 )
 print("cache initialization complete on rank", local_rank)
 
+add_special_tokens = tokenizer.bos_token_id != tokenizer.eos_token_id
+
 
 def ids_for_prompt(prompt):
     tokens = tokenizer.tokenize(prompt)
     ids = tokenizer.convert_tokens_to_ids(tokens)
-    ids = [tokenizer.bos_token_id] + ids
+    if add_special_tokens:
+        ids = [tokenizer.bos_token_id] + ids
     ids = torch.tensor(ids, dtype=torch.long, device=device)
     return ids
 
@@ -225,7 +239,8 @@ def print_result(result, inp, n_steps):
     if local_rank != 0:
         return
     # stop at EOS token if present
-    result = generation.truncate_after_eos(result, tokenizer.eos_token_id)
+    if add_special_tokens:
+        result = generation.truncate_after_eos(result, tokenizer.eos_token_id)
     print(tokenizer.convert_tokens_to_string(tokenizer.convert_ids_to_tokens(result)))
     print(f"{len(result) - len(inp)} tokens in {n_steps} steps")
     print()
@@ -239,7 +254,11 @@ def infer(ids, warmup):
         print("==================")
 
     cudagraphs = compile_mode == "reduce-overhead"
-
+    max_seq_len = (
+        model.config.max_expected_seq_len
+        if hasattr(model.config, "max_expected_seq_len")
+        else model.config.max_pos
+    )
     if speculator:
         result, n_steps, ttft, generated_token_time_out = speculative_generate(
             model,
@@ -247,7 +266,7 @@ def infer(ids, warmup):
             speculator,
             kv_cache_manager,
             new_tokens=100,
-            max_seq_len=model.config.max_expected_seq_len,
+            max_seq_len=max_seq_len,
             decode_model=decode_model,
             # todo: we can only reduce-overhead for now when batch size is 1
             flattening=not (args.compile and compile_mode == "reduce-overhead"),
@@ -260,7 +279,7 @@ def infer(ids, warmup):
             ids,
             kv_cache_manager,
             max_new_tokens=100,
-            max_seq_len=model.config.max_expected_seq_len,
+            max_seq_len=max_seq_len,
             do_sample=False,
             decode_model=decode_model,
             cudagraphs=cudagraphs,
