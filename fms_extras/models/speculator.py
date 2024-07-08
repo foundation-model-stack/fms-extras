@@ -32,15 +32,30 @@ class MLPSpeculator(nn.Module):
         Number of entries in the tokenizer associated with the base model.
     n_predict : int
         Number of heads / number of tokens to guess ahead. Model size and speed scale with this value.
+    tie_weights : bool
+        If true, use a single set of weights for every model head/stage after the first.
+        The initial projection from the base model may have a different size, so that stays separate.
+    scale_input: bool
+        If true, apply an extra layernorm to the initial state vector input.
+        Helps training dynamics, particularly when base model output has unusual scale.
     """
 
-    def __init__(self, emb_dim=4096, inner_dim=0, vocab_size=32000, n_predict=3):
+    def __init__(
+        self,
+        emb_dim=4096,
+        inner_dim=0,
+        vocab_size=32000,
+        n_predict=3,
+        tie_weights=False,
+        scale_input=False,
+    ):
         super().__init__()
         self.n_predict = n_predict
         self.emb_dim = emb_dim
         inner_dim = inner_dim if inner_dim != 0 else emb_dim
         self.inner_dim = inner_dim
         self.vsize = vocab_size
+        self.scale_input = scale_input
         self.emb = nn.ModuleList(
             [nn.Embedding(vocab_size, inner_dim) for _ in range(n_predict)]
         )
@@ -61,16 +76,40 @@ class MLPSpeculator(nn.Module):
                 for _ in range(n_predict)
             ]
         )
+        if self.scale_input:
+            self.ln0 = LayerNormParameterized(
+                emb_dim, elementwise_shift=False, elementwise_scale=False
+            )
         # Weights ensure that state_0 accounts for 50% of state magnitude by final head in expectation
         self.state_weight = 0.5 ** (0.5 / n_predict)
         self.emb_weight = math.sqrt((1 - self.state_weight**2) * (self.inner_dim / 2))
         self.activation = nn.GELU()
 
+        # Handle weight tying as specified
+        if tie_weights:
+            assert (
+                n_predict > 1
+            ), "You cannot tie weights between stages when only 1 exists"
+
+            for emb in self.emb:
+                emb.weight = self.emb[0].weight
+
+            for head in self.head:
+                head.weight = self.head[0].weight
+
+            for ln in self.ln:
+                ln.weight = self.ln[0].weight
+                ln.bias = self.ln[0].bias
+
+            # Since first proj has different size, allow different initial proj from base into model
+            for i in range(2, n_predict):
+                self.proj[i].weight = self.proj[1].weight
+
     def reset_parameters(self):
         for m in self.modules():
             if isinstance(m, nn.Embedding) or isinstance(m, nn.Linear):
                 nn.init.trunc_normal_(m.weight, 0, 1 / math.sqrt(self.inner_dim))
-            elif isinstance(m, LayerNormParameterized):
+            elif isinstance(m, LayerNormParameterized) and hasattr(m, "weight"):
                 m.weight.data.fill_(1)
                 m.bias.data.zero_()
 
@@ -114,6 +153,8 @@ class MLPSpeculator(nn.Module):
         assert (
             len(topk) == self.n_predict
         ), f"You must provide a topk number for each head ({self.n_predict} heads, {len(topk)} provided)"
+        if self.scale_input:
+            state = self.ln0(state) / (2**0.5)
         for i in range(self.n_predict):
             # Project and predict
             z = self.emb[i](ind)  # b k d
@@ -172,6 +213,8 @@ class MLPSpeculator(nn.Module):
             Has size [self.n_predict b n v] where v is vocab size.
         """
         out = []
+        if self.scale_input:
+            state = self.ln0(state) / (2**0.5)
         for i in range(self.n_predict):
             z = self.emb[i](inds[:, i : i + state.size(1)])  # b n d
             state = self.proj[i](state)
@@ -287,11 +330,45 @@ _llama_13b_code = {
     "inner_dim": 4096,
 }
 
+_llama_34b_code = {
+    "emb_dim": 8192,
+    "vocab_size": 32000,
+    "n_predict": 5,
+    "inner_dim": 8192,
+    "scale_input": True,
+    "tie_weights": True,
+}
+
 _llama3_8b_3_2b = {
     "emb_dim": 4096,
     "vocab_size": 128256,
     "n_predict": 4,
     "inner_dim": 3072,
+}
+
+_ibm_20b_code_instruct = {
+    "emb_dim": 6144,
+    "vocab_size": 49152,
+    "n_predict": 4,
+    "inner_dim": 4096,
+}
+
+_ibm_34b_code_instruct = {
+    "emb_dim": 6144,
+    "vocab_size": 49152,
+    "n_predict": 5,
+    "inner_dim": 6144,
+    "scale_input": True,
+    "tie_weights": True,
+}
+
+_llama3_70b_961m = {
+    "emb_dim": 8192,
+    "vocab_size": 128256,
+    "n_predict": 4,
+    "inner_dim": 3584,
+    "scale_input": True,
+    "tie_weights": True,
 }
 
 _calico_8b_test = {
@@ -300,6 +377,7 @@ _calico_8b_test = {
     "n_predict": 5,
     "inner_dim": 4096,
 }
+
 
 _architecture_name = "mlp_speculator"
 
@@ -332,11 +410,32 @@ models.register_model(
     "llama.13b.code.2b",
     _mlp_speculator_factory_factory(_llama_13b_code),
 )
-
+models.register_model(
+    _architecture_name,
+    "llama.34b.code.658m",
+    _mlp_speculator_factory_factory(_llama_34b_code),
+)
 models.register_model(
     _architecture_name,
     "llama.llama3.8b.3_2b",
     _mlp_speculator_factory_factory(_llama3_8b_3_2b),
+)
+models.register_model(
+    _architecture_name,
+    "llama.llama3.70b.961m",
+    _mlp_speculator_factory_factory(_llama3_70b_961m),
+)
+
+models.register_model(
+    _architecture_name,
+    "gpt_bigcode.ibm.20b.1_7b",
+    _mlp_speculator_factory_factory(_ibm_20b_code_instruct),
+)
+
+models.register_model(
+    _architecture_name,
+    "gpt_bigcode.ibm.34b.680m",
+    _mlp_speculator_factory_factory(_ibm_34b_code_instruct),
 )
 
 models.register_model(
