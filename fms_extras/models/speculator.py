@@ -35,6 +35,9 @@ class MLPSpeculator(nn.Module):
     tie_weights : bool
         If true, use a single set of weights for every model head/stage after the first.
         The initial projection from the base model may have a different size, so that stays separate.
+    scale_input: bool
+        If true, apply an extra layernorm to the initial state vector input. Helps training dynamics
+        when base model output has unusual scale, or when inner_dim and emb_dim have high mismatch.
     """
 
     def __init__(
