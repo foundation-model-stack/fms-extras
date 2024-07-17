@@ -113,7 +113,9 @@ class PagedGPTBigCodeBlock(nn.Module):
 
 
 class PagedGPTBigCodeHeadless(nn.Module):
-    def __init__(self, config: PagedGPTBigCodeConfig, distributed_strategy: DistributedStrategy):
+    def __init__(
+        self, config: PagedGPTBigCodeConfig, distributed_strategy: DistributedStrategy
+    ):
         super().__init__()
         self.config = config
         self.distributed_strategy = distributed_strategy
@@ -247,7 +249,9 @@ class PagedGPTBigCode(nn.Module):
         self.config = self.config.updated(**kwargs)
         self.distributed_strategy = distributed_strategy
 
-        self.base_model = PagedGPTBigCodeHeadless(self.config, self.distributed_strategy)
+        self.base_model = PagedGPTBigCodeHeadless(
+            self.config, self.distributed_strategy
+        )
         self.head = nn.Linear(
             self.config.emb_dim, self.config.src_vocab_size, bias=False
         )
