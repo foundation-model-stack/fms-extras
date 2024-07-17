@@ -5,11 +5,11 @@ from typing import Mapping, Optional
 import torch
 import torch.nn as nn
 from fms import models
+from fms.distributed.strategy import DistributedStrategy, NoOpStrategy
 from fms.modules.feedforward import FeedForwardBlock
 from fms.utils import serialization
 from fms.utils.activation import str_to_activation
 from fms.utils.config import ModelConfig
-from fms.distributed.strategy import DistributedStrategy, NoOpStrategy
 
 from fms_extras.modules.attention import PagedMultiHeadAttention
 from fms_extras.utils.cache.paged import (
