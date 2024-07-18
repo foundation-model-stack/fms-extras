@@ -5,6 +5,7 @@ from typing import Mapping, Optional
 import torch
 import torch.nn as nn
 from fms import models
+from fms.distributed.strategy import DistributedStrategy, NoOpStrategy
 from fms.modules.feedforward import FeedForwardBlock
 from fms.utils import serialization
 from fms.utils.activation import str_to_activation
@@ -112,18 +113,26 @@ class PagedGPTBigCodeBlock(nn.Module):
 
 
 class PagedGPTBigCodeHeadless(nn.Module):
-    def __init__(self, config: PagedGPTBigCodeConfig):
+    def __init__(
+        self, config: PagedGPTBigCodeConfig, distributed_strategy: DistributedStrategy
+    ):
         super().__init__()
         self.config = config
+        self.distributed_strategy = distributed_strategy
 
-        self.layers = nn.ModuleList(
-            [PagedGPTBigCodeBlock(self.config) for _ in range(self.config.nlayers)]
-        )
+        layers = []
+        for i in range(self.config.nlayers):
+            block = PagedGPTBigCodeBlock(self.config)
+            block_module = self.distributed_strategy.distribute_layer(block, i)
+            layers.append(block_module)
+        self.layers = nn.ModuleList(layers)
 
         self.embedding = nn.Embedding(self.config.src_vocab_size, self.config.emb_dim)
         self.position_embedding = nn.Embedding(self.config.max_pos, self.config.emb_dim)
 
-        self.dec_norm = nn.LayerNorm(self.config.emb_dim, eps=self.config.ln_eps)
+        self.dec_norm = self.distributed_strategy.distribute_module(
+            nn.LayerNorm(self.config.emb_dim, eps=self.config.ln_eps), final_layers=True
+        )
 
         if self.config.emb_dropout:
             self.emb_dropout = nn.Dropout(self.config.emb_dropout)
@@ -229,6 +238,7 @@ class PagedGPTBigCode(nn.Module):
     def __init__(
         self,
         config: Optional[PagedGPTBigCodeConfig] = None,
+        distributed_strategy: DistributedStrategy = NoOpStrategy,
         **kwargs,
     ):
         super(PagedGPTBigCode, self).__init__()
@@ -237,8 +247,11 @@ class PagedGPTBigCode(nn.Module):
         else:
             self.config = PagedGPTBigCodeConfig()
         self.config = self.config.updated(**kwargs)
+        self.distributed_strategy = distributed_strategy
 
-        self.base_model = PagedGPTBigCodeHeadless(self.config)
+        self.base_model = PagedGPTBigCodeHeadless(
+            self.config, self.distributed_strategy
+        )
         self.head = nn.Linear(
             self.config.emb_dim, self.config.src_vocab_size, bias=False
         )
