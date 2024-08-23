@@ -108,7 +108,7 @@ class MLPSpeculator(nn.Module):
     def reset_parameters(self):
         for m in self.modules():
             if isinstance(m, nn.Embedding) or isinstance(m, nn.Linear):
-                nn.init.trunc_normal_(m.weight, 0, 1 / math.sqrt(self.inner_dim))
+                nn.init.normal_(m.weight, 0, 1 / math.sqrt(self.inner_dim))
             elif isinstance(m, LayerNormParameterized) and hasattr(m, "weight"):
                 m.weight.data.fill_(1)
                 m.bias.data.zero_()
@@ -290,9 +290,9 @@ def flatten_batch(inp: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.
     batch_offset = 0
     # Generate the flatten/unflatten maps
     for b, candidate_set in enumerate(inp_list):
-        lineages: Dict[
-            Tuple[List[int]], int
-        ] = {}  # Prefix : n unique prefixes observed so far
+        lineages: Dict[Tuple[List[int]], int] = (
+            {}
+        )  # Prefix : n unique prefixes observed so far
         for k, candidate in enumerate(candidate_set):
             for n in range(len(candidate)):
                 lineage = tuple(candidate[: n + 1])
