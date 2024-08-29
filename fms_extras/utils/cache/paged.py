@@ -10,275 +10,10 @@ import torch.nn.functional as F
 from torch._dynamo import mark_static_address
 from torch._inductor.virtualized import V
 
+from fms_extras import _custom_ops as ops
 from fms_extras.models.speculator import apply_index_map
-from fms_extras.paged_c import attn_ops, cache_ops  # type: ignore
-
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]  # (key cache, value cache)
-
-# adding paged attention to the torch namespace in order to support torch compile
-lib = torch.library.Library("paged_attention", "FRAGMENT")
-
-lib.define(
-    "reshape_and_cache(Tensor key, Tensor value, Tensor key_cache, Tensor value_cache, Tensor slot_mapping) -> (Tensor, Tensor)"
-)
-
-
-# needed for compile
-@torch.library.impl(lib, "reshape_and_cache", "Meta")
-def _reshape_and_cache_meta(key, value, key_cache, value_cache, slot_mapping):
-    return key_cache, value_cache
-
-
-@torch.library.impl(lib, "reshape_and_cache", "CUDA")
-def _reshape_and_cache(key, value, key_cache, value_cache, slot_mapping):
-    cache_ops.reshape_and_cache(key, value, key_cache, value_cache, slot_mapping)
-    return key_cache, value_cache
-
-
-lowering.fallbacks.add(torch.ops.paged_attention.reshape_and_cache)
-
-
-@lowering.register_lowering(
-    torch.ops.paged_attention.reshape_and_cache, type_promotion_kind=None
-)
-def _reshape_and_cache_lowering(key, value, key_cache, value_cache, slot_mapping):
-    PagedAttnKernel.create(
-        torch.ops.paged_attention.reshape_and_cache.default,
-        key,
-        value,
-        key_cache,
-        value_cache,
-        slot_mapping,
-        mutated_inputs=[key_cache, value_cache],
-    )
-    return key_cache, value_cache
-
-
-lib.define(
-    "paged_attention_v2(Tensor out, Tensor exp_sums, Tensor max_logits, Tensor tmp_out, Tensor query, Tensor key_cache, Tensor value_cache, int num_kv_heads, float scale, Tensor block_tables, Tensor context_lens, int block_size, SymInt max_context_len, Tensor? alibi_slopes) -> Tensor"
-)
-
-
-@torch.library.impl(lib, "paged_attention_v2", "Meta")
-def _paged_attention_v2_meta(
-    out,
-    exp_sums,
-    max_logits,
-    tmp_out,
-    query,
-    key_cache,
-    value_cache,
-    num_kv_heads,
-    scale,
-    block_tables,
-    context_lens,
-    block_size,
-    max_context_len,
-    alibi_slopes=None,
-):
-    return out
-
-
-@torch.library.impl(lib, "paged_attention_v2", "CUDA")
-def _paged_attention_v2(
-    out,
-    exp_sums,
-    max_logits,
-    tmp_out,
-    query,
-    key_cache,
-    value_cache,
-    num_kv_heads,
-    scale,
-    block_tables,
-    context_lens,
-    block_size,
-    max_context_len,
-    alibi_slopes=None,
-):
-    attn_ops.paged_attention_v2(
-        out,
-        exp_sums,
-        max_logits,
-        tmp_out,
-        query,
-        key_cache,
-        value_cache,
-        num_kv_heads,
-        scale,
-        block_tables,
-        context_lens,
-        block_size,
-        max_context_len,
-        alibi_slopes,
-    )
-    return out
-
-
-lowering.fallbacks.add(torch.ops.paged_attention.paged_attention_v2)
-
-
-@lowering.register_lowering(
-    torch.ops.paged_attention.paged_attention_v2, type_promotion_kind=None
-)
-def _paged_attention_v2_lowering(
-    out,
-    exp_sums,
-    max_logits,
-    tmp_out,
-    query,
-    key_cache,
-    value_cache,
-    num_kv_heads,
-    scale,
-    block_tables,
-    context_lens,
-    block_size,
-    max_context_len,
-    alibi_slopes=None,
-):
-    PagedAttnKernel.create(
-        torch.ops.paged_attention.paged_attention_v2.default,
-        out,
-        exp_sums,
-        max_logits,
-        tmp_out,
-        query,
-        key_cache,
-        value_cache,
-        num_kv_heads,
-        scale,
-        block_tables,
-        context_lens,
-        block_size,
-        max_context_len,
-        alibi_slopes,
-        mutated_inputs=[out],
-    )
-    return out
-
-
-lib.define(
-    "paged_attention_v1(Tensor out, Tensor query, Tensor key_cache, Tensor value_cache, int num_kv_heads, float scale, Tensor block_tables, Tensor context_lens, int block_size, SymInt max_context_len, Tensor? alibi_slopes) -> Tensor"
-)
-
-
-@torch.library.impl(lib, "paged_attention_v1", "Meta")
-def _paged_attention_v1_meta(
-    out,
-    query,
-    key_cache,
-    value_cache,
-    num_kv_heads,
-    scale,
-    block_tables,
-    context_lens,
-    block_size,
-    max_context_len,
-    alibi_slopes=None,
-):
-    return out
-
-
-@torch.library.impl(lib, "paged_attention_v1", "CUDA")
-def _paged_attention_v1(
-    out,
-    query,
-    key_cache,
-    value_cache,
-    num_kv_heads,
-    scale,
-    block_tables,
-    context_lens,
-    block_size,
-    max_context_len,
-    alibi_slopes=None,
-):
-    attn_ops.paged_attention_v1(
-        out,
-        query,
-        key_cache,
-        value_cache,
-        num_kv_heads,
-        scale,
-        block_tables,
-        context_lens,
-        block_size,
-        max_context_len,
-        alibi_slopes,
-    )
-    return out
-
-
-lowering.fallbacks.add(torch.ops.paged_attention.paged_attention_v1)
-
-
-@lowering.register_lowering(
-    torch.ops.paged_attention.paged_attention_v1, type_promotion_kind=None
-)
-def _paged_attention_v1_lowering(
-    out,
-    query,
-    key_cache,
-    value_cache,
-    num_kv_heads,
-    scale,
-    block_tables,
-    context_lens,
-    block_size,
-    max_context_len,
-    alibi_slopes=None,
-):
-    PagedAttnKernel.create(
-        torch.ops.paged_attention.paged_attention_v1.default,
-        out,
-        query,
-        key_cache,
-        value_cache,
-        num_kv_heads,
-        scale,
-        block_tables,
-        context_lens,
-        block_size,
-        max_context_len,
-        alibi_slopes,
-        mutated_inputs=[out],
-    )
-    return out
-
-
-class PagedAttnKernel(ir.FallbackKernel):
-    def should_allocate(self):
-        return False
-
-    def has_side_effects(self):
-        return True
-
-    @classmethod
-    def create(cls, kernel, *args, mutated_inputs=[], **kwargs) -> None:
-        with V.graph.fake_mode:
-            (
-                example_output,
-                tensor_args,
-                non_tensor_args,
-                unflatten_args,
-            ) = cls.process_kernel(kernel, *args, **kwargs)
-        for tensor_arg in tensor_args:
-            tensor_arg.realize()
-
-        packed = cls(
-            ir.NoneLayout(tensor_args[0].get_device()),
-            kernel,
-            tensor_args,
-            non_tensor_args,
-            unflatten_args,
-        )
-        # Mark inplace inputs as mutated
-        for kernel_input in mutated_inputs:
-            V.graph.mark_buffer_mutated(kernel_input.get_name())
-            ir.MutationOutput(kernel_input.layout, kernel_input, packed)
-
 
 @dataclasses.dataclass
 class PagedAttentionCacheDataLayer:
@@ -340,7 +75,7 @@ class PagedAttentionCacheDataLayer:
             key_to_cache = keys.view(-1, self.kv_heads, self.head_size)
             value_to_cache = values.view(-1, self.kv_heads, self.head_size)
 
-        self.data_layer = torch.ops.paged_attention.reshape_and_cache(
+        ops.reshape_and_cache(
             key_to_cache,
             value_to_cache,
             self.data_layer[0],
@@ -389,7 +124,7 @@ class PagedAttentionCacheDataLayer:
         # to parallelize.
         # For context len > 8192, use V2 kernel to avoid shared memory shortage.
         if use_v1:
-            attn = torch.ops.paged_attention.paged_attention_v1(
+            ops.paged_attention_v1(
                 attn,
                 # num_sequences x num_heads x head_size
                 query,
@@ -416,7 +151,7 @@ class PagedAttentionCacheDataLayer:
             )
             max_logits = torch.empty_like(exp_sums)
 
-            attn = torch.ops.paged_attention.paged_attention_v2(
+            ops.paged_attention_v2(
                 attn,
                 exp_sums,
                 max_logits,
@@ -1282,10 +1017,14 @@ class PagedKVCacheManager:
 
         if not parent_cbg.last_cache_block_is_full():
             new_block_to_copy = self._allocate_block()
-            cache_ops.copy_blocks(
+            ops.copy_blocks(
                 key_caches,
                 value_caches,
-                {parent_cbg[-1].block_number: [new_block_to_copy.block_number]},
+                # {parent_cbg[-1].block_number: [new_block_to_copy.block_number]},
+                torch.tensor(
+                    (parent_cbg[-1].block_number, new_block_to_copy.block_number),
+                    dtype=torch.int64,
+                    device=self.device).view(-1, 2),
             )
             new_block_to_copy.append_num_tokens(parent_cbg[-1].num_tokens)
             child_cbg.pop()
