@@ -447,8 +447,25 @@ _8b_llama3_config = PagedLLaMAConfig(
     max_expected_seq_len=8192,
 )
 
+_70b_llama3_config = PagedLLaMAConfig(
+    src_vocab_size=128256,
+    emb_dim=8192,
+    norm_eps=1e-5,
+    nheads=64,
+    kvheads=8,
+    nlayers=80,
+    hidden_grow_factor=3.5,
+    multiple_of=4096,
+    max_expected_seq_len=8192,
+    rope_theta=500000,
+)
+
 models.register_model(
     _architecture_name, "llama3.8b", _llama_factory_factory((_8b_llama3_config))
+)
+
+models.register_model(
+    _architecture_name, "llama3.70b", _llama_factory_factory((_70b_llama3_config))
 )
 
 # calico

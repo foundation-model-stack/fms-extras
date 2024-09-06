@@ -138,15 +138,24 @@ if args.device_type == "cuda":
 else:
     device = torch.device(args.device_type)
 
-torch.set_default_dtype(torch.half)
+#torch.set_default_dtype(torch.half)
+torch.set_default_dtype(torch.bfloat16)
 
 # requires setting environment variable: `CUBLAS_WORKSPACE_CONFIG=:4096:8`
 if args.deterministic:
     torch.use_deterministic_algorithms(True)
 
 if args.distributed:
-    dist.init_process_group()
-    torch._C._distributed_c10d._register_process_group("default", dist.group.WORLD)
+    #dist.init_process_group()
+    #torch._C._distributed_c10d._register_process_group("default", dist.group.WORLD)
+    tp_size = 16
+    base_model_mesh = dist.device_mesh.init_device_mesh(
+        "cuda", (world_size // tp_size, tp_size), mesh_dim_names=("dp", "tp")
+    )
+    speculator_mesh = dist.device_mesh.init_device_mesh("cuda", (world_size,))
+    torch._C._distributed_c10d._register_process_group(
+        "default", base_model_mesh["tp"].get_group()
+    )    
 
 print("loading model")
 if args.distributed:
@@ -165,7 +174,8 @@ model = get_model(
     device_type=args.device_type,
     source=args.model_source,
     distributed_strategy=distr_param,
-    group=dist.group.WORLD,
+    #group=dist.group.WORLD,
+    group=base_model_mesh['tp'].get_group() if distr_param == 'tp' else None,
 )
 decode_model = None
 
@@ -176,22 +186,23 @@ speculator = None
 if args.speculator_path is not None:
     print("loading speculator")
     # todo: handling of remote weights in get_model
-    is_local = os.path.exists(args.speculator_path) or args.speculator_source != "hf"
-    if is_local:
-        speculator = get_model(
-            "mlp_speculator",
-            f"{args.architecture}.{args.variant}.{args.speculator_variant}",
-            model_path=args.speculator_path,
-            source=args.speculator_source,
-            device_type=args.device_type,
-        )
-    else:
+    #is_local = os.path.exists(args.speculator_path) or args.speculator_source != "hf"
+    #if is_local:
+    #    speculator = get_model(
+    #        "mlp_speculator",
+    #        f"{args.architecture}.{args.variant}.{args.speculator_variant}",
+    #        model_path=args.speculator_path,
+    #        source=args.speculator_source,
+    #        device_type=args.device_type,
+    #    )
+    #else:
+    if True:
         from fms_extras.models.hf.modeling_mlp_speculator import (
             MLPSpeculatorPreTrainedModel,
         )
 
         speculator = MLPSpeculatorPreTrainedModel.from_pretrained(
-            args.speculator_path, device_map=args.device_type
+            args.speculator_path, #device_map=args.device_type
         ).speculator
     speculator = speculator.to(device)
     if len(args.top_k_tokens_per_head) != speculator.n_predict:
