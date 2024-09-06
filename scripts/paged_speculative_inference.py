@@ -148,7 +148,7 @@ if args.deterministic:
 if args.distributed:
     #dist.init_process_group()
     #torch._C._distributed_c10d._register_process_group("default", dist.group.WORLD)
-    tp_size = 16
+    tp_size = 8
     base_model_mesh = dist.device_mesh.init_device_mesh(
         "cuda", (world_size // tp_size, tp_size), mesh_dim_names=("dp", "tp")
     )

@@ -445,6 +445,7 @@ _8b_llama3_config = PagedLLaMAConfig(
     hidden_grow_factor=3.5,
     multiple_of=1024,
     max_expected_seq_len=8192,
+    rope_theta=500000,
 )
 
 _70b_llama3_config = PagedLLaMAConfig(

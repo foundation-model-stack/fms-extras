@@ -270,4 +270,4 @@ MODEL_ARGS_LLAMA3_8B_HF="\
 torchrun \
     --nproc_per_node=8 \
     scripts/paged_speculative_inference.py \
-    ${MODEL_ARGS_LLAMA3_70B_SPECU2_CONVERTED_HF}
+    ${MODEL_ARGS_LLAMA3_8B_HF}
