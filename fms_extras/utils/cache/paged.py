@@ -263,7 +263,7 @@ class PagedAttnKernel(ir.FallbackKernel):
                 tensor_args,
                 non_tensor_args,
                 unflatten_args,
-            ) = cls.process_kernel(kernel, *args, **kwargs)
+            ) = cls.process_kernel(kernel, *args, **kwargs)  # type: ignore
         for tensor_arg in tensor_args:
             tensor_arg.realize()
 
