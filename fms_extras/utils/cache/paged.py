@@ -258,14 +258,12 @@ class PagedAttnKernel(ir.FallbackKernel):
     @classmethod
     def create(cls, kernel, *args, mutated_inputs=[], **kwargs) -> None:
         with V.graph.fake_mode:
-            (
-                example_output,
-                tensor_args,
-                non_tensor_args,
-                unflatten_args,
-            ) = cls.process_kernel(
-                kernel, *args, **kwargs
-            )  # type: ignore
+            # process_kernel returns 5 values since PyTorch 2.x added
+            # unbacked_bindings as the fifth element; unpack with * to stay
+            # compatible across versions.
+            example_output, tensor_args, non_tensor_args, unflatten_args, *_ = (
+                cls.process_kernel(kernel, *args, **kwargs)
+            )
         for tensor_arg in tensor_args:
             tensor_arg.realize()
 
